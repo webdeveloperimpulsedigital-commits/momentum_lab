@@ -13,7 +13,8 @@ import { LlmError } from "./llm.js";
 const app = express();
 const clientDistPath = [
   resolve(process.cwd(), "client/dist"),
-  resolve(process.cwd(), "../client/dist")
+  resolve(process.cwd(), "../client/dist"),
+  resolve(process.cwd(), "dist")
 ].find((path) => existsSync(path));
 
 app.use(
