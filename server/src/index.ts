@@ -4,11 +4,17 @@ import cookieParser from "cookie-parser";
 import morgan from "morgan";
 import { ZodError } from "zod";
 import multer from "multer";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { apiRouter } from "./routes.js";
 import { config, runtimeStatus } from "./config.js";
 import { LlmError } from "./llm.js";
 
 const app = express();
+const clientDistPath = [
+  resolve(process.cwd(), "client/dist"),
+  resolve(process.cwd(), "../client/dist")
+].find((path) => existsSync(path));
 
 app.use(
   cors({
@@ -29,6 +35,18 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api", apiRouter);
+
+if (clientDistPath) {
+  app.use(express.static(clientDistPath));
+  app.get("*", (_req, res, next) => {
+    if (_req.path.startsWith("/api")) {
+      next();
+      return;
+    }
+
+    res.sendFile(resolve(clientDistPath, "index.html"));
+  });
+}
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (error instanceof multer.MulterError) {
