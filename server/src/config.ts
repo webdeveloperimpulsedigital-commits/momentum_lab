@@ -11,8 +11,10 @@ for (const path of envPaths) {
   dotenv.config({ path, override: false });
 }
 
+const rawPort = process.env.PORT ?? "3001";
+
 export const config = {
-  port: Number(process.env.PORT ?? 3001),
+  port: isNaN(Number(rawPort)) ? rawPort : Number(rawPort),
   appBaseUrl: process.env.APP_BASE_URL ?? "http://localhost:5173",
   authSecret: process.env.AUTH_SECRET ?? "development-only-change-me",
   adminEmail: process.env.ADMIN_EMAIL ?? "admin@momentum.local",
