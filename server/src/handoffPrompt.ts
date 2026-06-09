@@ -10,9 +10,119 @@ import type {
 
 const deckDepthGuidance: Record<DeckDepth, string> = {
   "Short deck": "Recommend roughly 6 to 8 slides. Avoid filler.",
-  "Standard deck": "Recommend roughly 10 to 14 slides. Build a complete pitch narrative.",
+  "Standard deck": "Recommend roughly 10 to 12 slides. Build a complete pitch narrative with concise slide fields.",
   "Detailed deck": "Recommend roughly 15 to 22 slides only where useful. Still do not create the deck."
 };
+
+function truncateText(value: unknown, maxLength = 700) {
+  const text = String(value ?? "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 4).trim()} ...` : text;
+}
+
+function compactList(value: unknown, maxItems = 8, maxItemLength = 260) {
+  return Array.isArray(value)
+    ? value.map((item) => truncateText(item, maxItemLength)).filter(Boolean).slice(0, maxItems)
+    : [];
+}
+
+function compactJson(value: unknown, maxLength = 900) {
+  if (value === null || value === undefined) return null;
+  return truncateText(JSON.stringify(value), maxLength);
+}
+
+function compactBlueprint(blueprint: CampaignBlueprint) {
+  return {
+    id: blueprint.id,
+    blueprint_depth: blueprint.blueprint_depth,
+    blueprint_title: truncateText(blueprint.blueprint_title, 220),
+    selected_campaign_truth: truncateText(blueprint.selected_campaign_truth, 520),
+    route_summary: truncateText(blueprint.route_summary, 520),
+    strategic_problem: truncateText(blueprint.strategic_problem, 420),
+    audience_tension: truncateText(blueprint.audience_tension, 420),
+    category_pressure: truncateText(blueprint.category_pressure, 420),
+    brand_product_truth: truncateText(blueprint.brand_product_truth, 420),
+    brand_role: truncateText(blueprint.brand_role, 320),
+    campaign_platform_statement: truncateText(blueprint.campaign_platform_statement, 520),
+    campaign_promise: truncateText(blueprint.campaign_promise, 420),
+    message_hierarchy: compactJson(blueprint.message_hierarchy, 900),
+    core_narrative_arc: truncateText(blueprint.core_narrative_arc, 700),
+    execution_pillars: blueprint.execution_pillars.slice(0, 5).map((pillar) => compactJson(pillar, 500)),
+    campaign_mechanics: compactList(blueprint.campaign_mechanics, 8, 220),
+    touchpoint_system: blueprint.touchpoint_system.slice(0, 6).map((touchpoint) => compactJson(touchpoint, 450)),
+    proof_stack_required: compactList(blueprint.proof_stack_required, 10, 260),
+    assets_formats_to_explore: compactList(blueprint.assets_formats_to_explore, 10, 220),
+    rollout_logic: truncateText(blueprint.rollout_logic, 420),
+    risks_watchouts: compactList(blueprint.risks_watchouts, 8, 260),
+    feasibility_notes: truncateText(blueprint.feasibility_notes, 420),
+    assumptions: compactList(blueprint.assumptions, 8, 260),
+    missing_context: compactList(blueprint.missing_context, 8, 260),
+    open_questions: compactList(blueprint.open_questions, 8, 260),
+    next_recommended_action: truncateText(blueprint.next_recommended_action, 320)
+  };
+}
+
+function compactFinalSelection(finalSelection: FinalCampaignTruth | null) {
+  if (!finalSelection) return null;
+  return {
+    id: finalSelection.id,
+    final_route_title: truncateText(finalSelection.final_route_title, 220),
+    final_campaign_truth: truncateText(finalSelection.final_campaign_truth, 520),
+    selection_rationale: truncateText(finalSelection.selection_rationale, 520),
+    why_this_route_won: truncateText(finalSelection.why_this_route_won, 420),
+    rejected_or_deprioritised_notes: truncateText(finalSelection.rejected_or_deprioritised_notes, 320),
+    proof_required: truncateText(finalSelection.proof_required, 420),
+    risks_watchouts: truncateText(finalSelection.risks_watchouts, 420),
+    assumptions: truncateText(finalSelection.assumptions, 320),
+    missing_context: truncateText(finalSelection.missing_context, 320),
+    next_action: truncateText(finalSelection.next_action, 260)
+  };
+}
+
+function compactRoute(route: DevelopedRoute | null) {
+  if (!route) return null;
+  return {
+    id: route.id,
+    route_depth: route.route_depth,
+    route_title: truncateText(route.route_title ?? route.route_name, 220),
+    route_summary: truncateText(route.route_summary, 520),
+    core_campaign_thought: truncateText(route.core_campaign_thought ?? route.core_thought, 520),
+    audience_tension: truncateText(route.audience_tension, 360),
+    category_pressure: truncateText(route.category_pressure, 360),
+    brand_product_truth: truncateText(route.brand_product_truth, 360),
+    brand_role: truncateText(route.brand_role, 260),
+    campaign_mechanics: compactList(route.campaign_mechanics, 8, 220),
+    execution_system: compactJson(route.execution_system, 800),
+    sample_touchpoints: compactList(route.sample_touchpoints, 8, 220),
+    proof_needed: truncateText(route.proof_needed, 420),
+    risks: truncateText(route.risks ?? route.risk_notes, 420),
+    feasibility_notes: truncateText(route.feasibility_notes, 320),
+    source_grounding_summary: truncateText(route.source_grounding_summary, 320),
+    assumptions: compactList(route.assumptions, 6, 220),
+    missing_context: compactList(route.missing_context, 6, 220),
+    next_refinement_questions: compactList(route.next_refinement_questions, 6, 220)
+  };
+}
+
+function compactContextPack(contextPack: ContextPack) {
+  return {
+    retrieval_scope: contextPack.retrieval_scope,
+    retrieval_mode: contextPack.retrieval_mode,
+    total_chunks: contextPack.total_chunks,
+    total_characters: contextPack.total_characters,
+    mandatory_rules_found: contextPack.mandatory_rules_found,
+    missing_or_unavailable_context: compactList(contextPack.missing_or_unavailable_context, 6, 220),
+    sections: contextPack.sections.map((section) => ({
+      title: section.title,
+      role: section.role,
+      chunks: section.chunks.map((chunk) => ({
+        source_title: truncateText(chunk.source_title, 160),
+        source_role: chunk.source_role,
+        source_scope: chunk.source_scope,
+        snippet: truncateText(chunk.snippet, chunk.source_role === "mandatory_rule" ? 650 : 420)
+      }))
+    }))
+  };
+}
 
 export function buildPitchDeckHandoffPrompt(input: {
   project: {
@@ -110,28 +220,13 @@ export function buildPitchDeckHandoffPrompt(input: {
       audience_type: input.audienceType,
       user_instruction: input.userInstruction ?? null,
       project: input.project,
-      campaign_blueprint: input.blueprint,
-      final_selection: input.finalSelection,
-      developed_route: input.route,
-      context_pack: {
-        retrieval_scope: input.contextPack.retrieval_scope,
-        retrieval_mode: input.contextPack.retrieval_mode,
-        mandatory_rules_found: input.contextPack.mandatory_rules_found,
-        missing_or_unavailable_context: input.contextPack.missing_or_unavailable_context,
-        sections: input.contextPack.sections.map((section) => ({
-          title: section.title,
-          role: section.role,
-          chunks: section.chunks.map((chunk) => ({
-            source_title: chunk.source_title,
-            source_role: chunk.source_role,
-            source_scope: chunk.source_scope,
-            snippet: chunk.snippet
-          }))
-        }))
-      }
+      campaign_blueprint: compactBlueprint(input.blueprint),
+      final_selection: compactFinalSelection(input.finalSelection),
+      developed_route: compactRoute(input.route),
+      context_pack: compactContextPack(input.contextPack)
     },
     null,
-    2
+    0
   );
 
   return { system, user };

@@ -13,7 +13,11 @@
     "build": "npm run build --workspace shared && npm run build --workspace server && npm run build --workspace client && node scripts/copy-dist.mjs",
     "start": "npm run start --workspace server",
     "typecheck": "npm run build --workspace shared && npm run typecheck --workspace server && npm run typecheck --workspace client",
-    "smoke:test": "npm run build --workspace shared && npm run build --workspace server && node scripts/smoke-test.mjs"
+    "smoke:core": "npm run build --workspace shared && npm run build --workspace server && SMOKE_MODE=core node scripts/smoke-test.mjs",
+    "smoke:llm": "npm run build --workspace shared && npm run build --workspace server && SMOKE_MODE=llm node scripts/smoke-test.mjs",
+    "smoke:full": "npm run build --workspace shared && npm run build --workspace server && SMOKE_MODE=full node scripts/smoke-test.mjs",
+    "smoke:test": "npm run smoke:full",
+    "regression:llm-variants": "npm run build --workspace shared && npm run build --workspace server && SMOKE_MODE=llm-variants node scripts/smoke-test.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

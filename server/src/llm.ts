@@ -20,6 +20,7 @@ export async function generateStructuredText(input: {
   system: string;
   user: string;
   purpose: string;
+  metadata?: Record<string, string | number | boolean | null | undefined>;
 }) {
   if (config.llmProvider !== "openai") {
     throw new LlmError("Unsupported LLM provider");
@@ -30,6 +31,28 @@ export async function generateStructuredText(input: {
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.llmTimeoutMs);
+  const startedAt = Date.now();
+  const promptCharacters = input.system.length + input.user.length;
+  const promptTokenEstimate = Math.ceil(promptCharacters / 4);
+  const safeMetadata = input.metadata
+    ? Object.fromEntries(Object.entries(input.metadata).filter(([, value]) => value !== undefined))
+    : undefined;
+
+  console.info(
+    JSON.stringify({
+      event: "llm_call_start",
+      purpose: input.purpose,
+      provider: config.llmProvider,
+      model: config.llmModel,
+      timeout_ms: config.llmTimeoutMs,
+      max_output_tokens: config.llmMaxOutputTokens,
+      system_characters: input.system.length,
+      user_characters: input.user.length,
+      prompt_characters: promptCharacters,
+      prompt_token_estimate: promptTokenEstimate,
+      metadata: safeMetadata
+    })
+  );
 
   try {
     const response = await fetch("https://api.openai.com/v1/responses", {
@@ -52,6 +75,16 @@ export async function generateStructuredText(input: {
 
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
+      console.warn(
+        JSON.stringify({
+          event: "llm_call_failed",
+          purpose: input.purpose,
+          status: response.status,
+          elapsed_ms: Date.now() - startedAt,
+          failure_source: "provider_http",
+          metadata: safeMetadata
+        })
+      );
       if (response.status === 401 || response.status === 403) {
         throw new LlmError("LLM provider rejected the configured key");
       }
@@ -75,6 +108,24 @@ export async function generateStructuredText(input: {
       throw new LlmError("LLM provider returned an empty response");
     }
 
+    console.info(
+      JSON.stringify({
+        event: "llm_call_success",
+        purpose: input.purpose,
+        status: response.status,
+        elapsed_ms: Date.now() - startedAt,
+        output_characters: text.length,
+        usage: body.usage
+          ? {
+              input_tokens: body.usage.input_tokens,
+              output_tokens: body.usage.output_tokens,
+              total_tokens: body.usage.total_tokens
+            }
+          : null,
+        metadata: safeMetadata
+      })
+    );
+
     return {
       text,
       provider: config.llmProvider,
@@ -90,8 +141,27 @@ export async function generateStructuredText(input: {
   } catch (error) {
     if (error instanceof LlmError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
+      console.warn(
+        JSON.stringify({
+          event: "llm_call_failed",
+          purpose: input.purpose,
+          elapsed_ms: Date.now() - startedAt,
+          failure_source: "app_timeout",
+          timeout_ms: config.llmTimeoutMs,
+          metadata: safeMetadata
+        })
+      );
       throw new LlmError("LLM provider request timed out");
     }
+    console.warn(
+      JSON.stringify({
+        event: "llm_call_failed",
+        purpose: input.purpose,
+        elapsed_ms: Date.now() - startedAt,
+        failure_source: "provider_request",
+        metadata: safeMetadata
+      })
+    );
     throw new LlmError("LLM provider request failed");
   } finally {
     clearTimeout(timeout);

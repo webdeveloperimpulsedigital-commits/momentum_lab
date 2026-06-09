@@ -22,9 +22,47 @@ const baseUrl = `http://127.0.0.1:${port}`;
 const localEnv = readLocalEnv();
 const adminEmail = process.env.ADMIN_EMAIL || localEnv.ADMIN_EMAIL || "admin@momentum.local";
 const adminPassword = process.env.ADMIN_PASSWORD || localEnv.ADMIN_PASSWORD || "password";
+const smokeMode = process.env.SMOKE_MODE ?? "full";
+const smokeTrace = process.env.SMOKE_TRACE === "1" || process.env.SMOKE_PROGRESS !== "0";
+const smokeFetchTimeoutMs = Number(process.env.SMOKE_FETCH_TIMEOUT_MS ?? 90000);
+const runCoreOnly = smokeMode === "core";
+const runVariantCoverage = smokeMode === "llm-variants";
+const runRepresentativeLlm = smokeMode === "llm" || smokeMode === "full" || runVariantCoverage;
 let cookie = "";
 let supabaseAdminForCleanup = null;
 let userBIdForCleanup = null;
+
+const nativeFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = async (url, options = {}) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), smokeFetchTimeoutMs);
+  const label = typeof url === "string" ? url : url?.url ?? "fetch";
+  if (smokeTrace) console.log(`[smoke] fetch start ${label}`);
+
+  try {
+    const response = await nativeFetch(url, {
+      ...options,
+      signal: options.signal ?? controller.signal
+    });
+    if (smokeTrace) console.log(`[smoke] fetch done ${response.status} ${label}`);
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Smoke fetch timed out after ${smokeFetchTimeoutMs}ms: ${label}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+function trace(message) {
+  if (smokeTrace) console.log(`[smoke] ${message}`);
+}
+
+function elapsedMs(start) {
+  return `${Date.now() - start}ms`;
+}
 
 const server = spawn("node", ["server/dist/index.js"], {
   cwd: process.cwd(),
@@ -50,15 +88,20 @@ function wait(ms) {
 }
 
 async function request(path, options = {}) {
+  const { smokeLabel, ...requestOptions } = options;
+  const method = options.method ?? "GET";
+  const started = Date.now();
+  const label = smokeLabel ? ` [${smokeLabel}]` : "";
+  trace(`start ${method} ${path}${label}`);
   const headers = {
     "Content-Type": "application/json",
-    ...(options.headers ?? {})
+    ...(requestOptions.headers ?? {})
   };
 
   if (cookie) headers.cookie = cookie;
 
   const response = await fetch(`${baseUrl}${path}`, {
-    ...options,
+    ...requestOptions,
     headers
   });
 
@@ -66,14 +109,21 @@ async function request(path, options = {}) {
   if (setCookie) cookie = setCookie.split(";")[0];
 
   const body = response.status === 204 ? null : await response.json();
+  trace(`done ${method} ${path}${label} -> ${response.status} in ${elapsedMs(started)}`);
   if (!response.ok) {
-    throw new Error(`${path} returned ${response.status}: ${JSON.stringify(body)}`);
+    const detail = response.status === 504 && body?.error
+      ? ` (${body.error}; likely app/OpenAI LLM timeout surfaced by API)`
+      : "";
+    throw new Error(`${method} ${path} returned ${response.status}${detail}: ${JSON.stringify(body)}`);
   }
 
   return body;
 }
 
 async function requestWithCookie(path, sessionCookie, options = {}) {
+  const method = options.method ?? "GET";
+  const started = Date.now();
+  trace(`start ${method} ${path} with alternate session`);
   const headers = {
     "Content-Type": "application/json",
     ...(options.headers ?? {}),
@@ -86,6 +136,7 @@ async function requestWithCookie(path, sessionCookie, options = {}) {
   });
 
   const body = response.status === 204 ? null : await response.json().catch(() => ({}));
+  trace(`done ${method} ${path} with alternate session -> ${response.status} in ${elapsedMs(started)}`);
   return { response, body };
 }
 
@@ -119,6 +170,8 @@ async function waitForHealth() {
 }
 
 async function upload(path, fields, file) {
+  const started = Date.now();
+  trace(`start UPLOAD ${path} ${file.name}`);
   const formData = new FormData();
   for (const [key, value] of Object.entries(fields)) {
     formData.set(key, Array.isArray(value) ? value.join(",") : value ?? "");
@@ -135,6 +188,7 @@ async function upload(path, fields, file) {
   });
 
   const body = await response.json().catch(() => ({}));
+  trace(`done UPLOAD ${path} ${file.name} -> ${response.status} in ${elapsedMs(started)}`);
   if (!response.ok) {
     throw new Error(`${path} returned ${response.status}: ${JSON.stringify(body)}`);
   }
@@ -143,6 +197,8 @@ async function upload(path, fields, file) {
 }
 
 async function expectUploadFailure(path, fields, file) {
+  const started = Date.now();
+  trace(`start expected-failure UPLOAD ${path} ${file.name}`);
   const formData = new FormData();
   for (const [key, value] of Object.entries(fields)) {
     formData.set(key, Array.isArray(value) ? value.join(",") : value ?? "");
@@ -161,10 +217,16 @@ async function expectUploadFailure(path, fields, file) {
   if (response.ok) {
     throw new Error(`${path} unexpectedly accepted invalid upload`);
   }
+  trace(`done expected-failure UPLOAD ${path} ${file.name} -> ${response.status} in ${elapsedMs(started)}`);
 }
 
 async function run() {
+  trace(`run start mode=${smokeMode}`);
+  if (!["core", "llm", "full", "llm-variants"].includes(smokeMode)) {
+    throw new Error(`Unsupported SMOKE_MODE: ${smokeMode}`);
+  }
   const health = await waitForHealth();
+  trace(`health ok ${JSON.stringify(health)}`);
   await request("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ email: adminEmail, password: adminPassword })
@@ -528,8 +590,72 @@ async function run() {
   if (!combinedScopesInPack.has("project") || !combinedScopesInPack.has("global")) {
     throw new Error("Expected combined context pack to include allowed project and global chunks");
   }
+
+  await expectBlockedWithCookie(`/api/projects/${projectId}/sources`, userBCookie);
+  await expectBlockedWithCookie(
+    `/api/projects/${projectId}/source-search?q=Sourcepack&scope=project&limit=5`,
+    userBCookie
+  );
+  await expectBlockedWithCookie(
+    `/api/projects/${projectId}/sources/${projectUpload.source.id}/content`,
+    userBCookie
+  );
+  const nonAdminGlobalCreate = await requestWithCookie("/api/global-sources", userBCookie, {
+    method: "POST",
+    body: JSON.stringify({
+      title: "Blocked global source",
+      source_role: "context",
+      source_type: "text",
+      source_status: "active"
+    })
+  });
+  if (nonAdminGlobalCreate.response.status !== 403) {
+    throw new Error(`Expected non-admin global source create to return 403, got ${nonAdminGlobalCreate.response.status}`);
+  }
+
+  if (runCoreOnly) {
+    await request(`/api/global-sources/${globalCreated.source.id}`, { method: "DELETE" });
+    await request(`/api/global-sources/${globalUpload.source.id}`, { method: "DELETE" });
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          mode: smokeMode,
+          storageMode: health.storageMode,
+          authMode: health.authMode,
+          supabaseConfigured: health.supabaseConfigured,
+          projectId,
+          sourceCoverage: {
+            globalProcessing: processedGlobal.source.processing_status,
+            globalEmbedding: embeddedGlobal.source.embedding_status,
+            projectProcessing: processedProjectFile.source.processing_status,
+            projectEmbedding: embeddedProject.source.embedding_status,
+            projectSearchResults: projectSearch.results.length,
+            globalSearchResults: globalSearch.results.length,
+            combinedSearchResults: combinedSearch.results.length,
+            projectContextPackChunks: projectContextPack.contextPack.total_chunks,
+            globalContextPackChunks: globalContextPack.contextPack.total_chunks,
+            combinedContextPackChunks: combinedContextPack.contextPack.total_chunks
+          },
+          permissions: {
+            userBProjectSourcesBlocked: true,
+            userBProjectSearchBlocked: true,
+            userBProjectContentBlocked: true,
+            nonAdminGlobalCreateBlocked: true
+          }
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (!runRepresentativeLlm) return;
+
   const generatedDossier = await request(`/api/projects/${projectId}/dossiers`, {
     method: "POST",
+    smokeLabel: "dossier:project-plus-global/semantic",
     body: JSON.stringify({
       query: "Prepare a concise grounded dossier for sourcepack strategy.",
       retrieval_scope: "project_plus_global",
@@ -561,6 +687,7 @@ async function run() {
   }
   const generatedIdeas = await request(`/api/projects/${projectId}/idea-cards/generate`, {
     method: "POST",
+    smokeLabel: "idea-generation:Sharp",
     body: JSON.stringify({
       query: "Generate sourcepack thought starters that obey mandatory rules and use inspiration only as stimulus.",
       dossier_id: generatedDossier.dossier.id,
@@ -599,9 +726,11 @@ async function run() {
   if (!storedIdeas.ideas.some((idea) => idea.id === generatedIdeas.ideas[0].id)) {
     throw new Error("Expected generated idea cards to be stored");
   }
-  for (const braveryLevel of ["Safe", "Bold", "Wild", "Chaos first"]) {
+  const braveryVariants = runVariantCoverage ? ["Safe", "Bold", "Wild", "Chaos first"] : [];
+  for (const braveryLevel of braveryVariants) {
     const braveryIdeas = await request(`/api/projects/${projectId}/idea-cards/generate`, {
       method: "POST",
+      smokeLabel: `idea-generation:${braveryLevel}`,
       body: JSON.stringify({
         query: `Generate ${braveryLevel} sourcepack thought starters that obey mandatory rules and avoid genericness.`,
         dossier_id: generatedDossier.dossier.id,
@@ -751,6 +880,7 @@ async function run() {
   const evaluateIdeas = async (evaluationMode, ideaIds) => {
     const result = await request(`/api/projects/${projectId}/idea-evaluations/generate`, {
       method: "POST",
+      smokeLabel: `idea-evaluation:${evaluationMode}`,
       body: JSON.stringify({
         query: `Evaluate sourcepack ideas using ${evaluationMode}. Flag genericness, unsupported claims, mandatory rule risk, and inspiration-as-proof mistakes.`,
         idea_card_ids: ideaIds,
@@ -807,10 +937,12 @@ async function run() {
     generatedIdeas.ideas[0].id,
     generatedIdeas.ideas[1].id
   ]);
-  await evaluateIdeas("Quick screen", [generatedIdeas.ideas[0].id]);
-  await evaluateIdeas("Creative red-team", [generatedIdeas.ideas[0].id]);
-  await evaluateIdeas("Commercial feasibility check", [generatedIdeas.ideas[0].id]);
-  await evaluateIdeas("Anti-generic audit", [generatedIdeas.ideas[0].id]);
+  if (runVariantCoverage) {
+    await evaluateIdeas("Quick screen", [generatedIdeas.ideas[0].id]);
+    await evaluateIdeas("Creative red-team", [generatedIdeas.ideas[0].id]);
+    await evaluateIdeas("Commercial feasibility check", [generatedIdeas.ideas[0].id]);
+    await evaluateIdeas("Anti-generic audit", [generatedIdeas.ideas[0].id]);
+  }
 
   const storedEvaluations = await request(`/api/projects/${projectId}/idea-evaluations`);
   if (!storedEvaluations.evaluations.some((evaluation) => evaluation.id === strategicEvaluations[0].id)) {
@@ -898,6 +1030,7 @@ async function run() {
   const developRoute = async ({ ideaId, evaluationId, routeDepth }) => {
     const result = await request(`/api/projects/${projectId}/routes/develop`, {
       method: "POST",
+      smokeLabel: `route-development:${routeDepth}`,
       body: JSON.stringify({
         query: `Develop a ${routeDepth} from this idea. Preserve proof gaps, assumptions, mandatory constraints, and inspiration-as-stimulus handling.`,
         idea_card_id: ideaId,
@@ -936,16 +1069,20 @@ async function run() {
     evaluationId: strategicEvaluations.find((evaluation) => evaluation.idea_card_id === shortlistedIdeaCard.idea.id)?.id,
     routeDepth: "Standard route"
   });
-  const lightRoute = await developRoute({
-    ideaId: generatedIdeas.ideas[2].id,
-    evaluationId: undefined,
-    routeDepth: "Light route"
-  });
-  const deepRoute = await developRoute({
-    ideaId: generatedIdeas.ideas[2].id,
-    evaluationId: undefined,
-    routeDepth: "Deep route"
-  });
+  const lightRoute = runVariantCoverage
+    ? await developRoute({
+        ideaId: generatedIdeas.ideas[2].id,
+        evaluationId: undefined,
+        routeDepth: "Light route"
+      })
+    : standardRoute;
+  const deepRoute = runVariantCoverage
+    ? await developRoute({
+        ideaId: generatedIdeas.ideas[2].id,
+        evaluationId: undefined,
+        routeDepth: "Deep route"
+      })
+    : standardRoute;
   const routeNote = await request(`/api/projects/${projectId}/routes/${standardRoute.id}/revision-notes`, {
     method: "POST",
     body: JSON.stringify({ note: "Smoke route revision note" })
@@ -1103,6 +1240,7 @@ async function run() {
   const generateBlueprint = async (blueprintDepth) => {
     const result = await request(`/api/projects/${projectId}/campaign-blueprints/generate`, {
       method: "POST",
+      smokeLabel: `campaign-blueprint:${blueprintDepth}`,
       body: JSON.stringify({
         query: `Generate a ${blueprintDepth} from the active final selection. Keep proof gaps, assumptions, mandatory rules, and inspiration-as-stimulus handling visible.`,
         final_selection_id: secondFinalSelection.finalTruth.id,
@@ -1140,9 +1278,9 @@ async function run() {
     blueprintChecks[blueprintDepth] = (blueprintChecks[blueprintDepth] ?? 0) + 1;
     return result.blueprint;
   };
-  const leanBlueprint = await generateBlueprint("Lean blueprint");
   const standardBlueprint = await generateBlueprint("Standard blueprint");
-  const detailedBlueprint = await generateBlueprint("Detailed blueprint");
+  const leanBlueprint = runVariantCoverage ? await generateBlueprint("Lean blueprint") : standardBlueprint;
+  const detailedBlueprint = runVariantCoverage ? await generateBlueprint("Detailed blueprint") : standardBlueprint;
   const blueprintNote = await request(`/api/projects/${projectId}/campaign-blueprints/${standardBlueprint.id}/revision-notes`, {
     method: "POST",
     body: JSON.stringify({ note: "Smoke campaign blueprint revision note" })
@@ -1231,6 +1369,7 @@ async function run() {
   const generateHandoff = async ({ handoffType, deckDepth, audienceType }) => {
     const result = await request(`/api/projects/${projectId}/pitch-deck-handoffs/generate`, {
       method: "POST",
+      smokeLabel: `pitch-deck-handoff:${handoffType}/${deckDepth}/${audienceType}`,
       body: JSON.stringify({
         query: `Create a ${deckDepth} ${handoffType} for ${audienceType}. Keep proof gaps, assumptions, internal-only notes, and no-PPT boundary visible.`,
         campaign_blueprint_id: standardBlueprint.id,
@@ -1274,31 +1413,39 @@ async function run() {
     audienceChecks[audienceType] = (audienceChecks[audienceType] ?? 0) + 1;
     return result.handoff;
   };
-  const internalHandoff = await generateHandoff({
-    handoffType: "Internal pitch structure",
-    deckDepth: "Short deck",
-    audienceType: "Internal team"
-  });
-  const clientHandoff = await generateHandoff({
-    handoffType: "Client pitch structure",
-    deckDepth: "Standard deck",
-    audienceType: "Client leadership"
-  });
-  const founderHandoff = await generateHandoff({
-    handoffType: "Founder review structure",
-    deckDepth: "Detailed deck",
-    audienceType: "B2B boardroom"
-  });
-  const creativeHandoff = await generateHandoff({
-    handoffType: "Creative team handoff",
-    deckDepth: "Standard deck",
-    audienceType: "Creative review"
-  });
   const pptHandoff = await generateHandoff({
     handoffType: "PPT design team handoff",
     deckDepth: "Standard deck",
     audienceType: "Marketing team"
   });
+  const internalHandoff = runVariantCoverage
+    ? await generateHandoff({
+        handoffType: "Internal pitch structure",
+        deckDepth: "Short deck",
+        audienceType: "Internal team"
+      })
+    : pptHandoff;
+  const clientHandoff = runVariantCoverage
+    ? await generateHandoff({
+        handoffType: "Client pitch structure",
+        deckDepth: "Standard deck",
+        audienceType: "Client leadership"
+      })
+    : pptHandoff;
+  const founderHandoff = runVariantCoverage
+    ? await generateHandoff({
+        handoffType: "Founder review structure",
+        deckDepth: "Detailed deck",
+        audienceType: "B2B boardroom"
+      })
+    : pptHandoff;
+  const creativeHandoff = runVariantCoverage
+    ? await generateHandoff({
+        handoffType: "Creative team handoff",
+        deckDepth: "Standard deck",
+        audienceType: "Creative review"
+      })
+    : pptHandoff;
   const handoffNote = await request(`/api/projects/${projectId}/pitch-deck-handoffs/${pptHandoff.id}/revision-notes`, {
     method: "POST",
     body: JSON.stringify({ note: "Smoke pitch deck handoff revision note" })
@@ -1387,6 +1534,7 @@ async function run() {
   const generateReview = async (reviewMode) => {
     const result = await request(`/api/projects/${projectId}/pitch-deck-handoff-reviews/generate`, {
       method: "POST",
+      smokeLabel: `pitch-deck-handoff-review:${reviewMode}`,
       body: JSON.stringify({
         query: `Review this pitch deck handoff using ${reviewMode}. Flag proof gaps, internal-only content, unsupported claims, visual asset gaps, and slide-level risks.`,
         pitch_deck_handoff_id: pptHandoff.id,
@@ -1449,10 +1597,10 @@ async function run() {
     reviewChecks[reviewMode] = (reviewChecks[reviewMode] ?? 0) + 1;
     return result;
   };
-  const quickReview = await generateReview("Quick readiness scan");
   const standardReview = await generateReview("Standard client-readiness review");
-  const deepReview = await generateReview("Deep red-team review");
-  const founderReview = await generateReview("Founder review");
+  const quickReview = runVariantCoverage ? await generateReview("Quick readiness scan") : standardReview;
+  const deepReview = runVariantCoverage ? await generateReview("Deep red-team review") : standardReview;
+  const founderReview = runVariantCoverage ? await generateReview("Founder review") : standardReview;
   const reviewNote = await request(`/api/projects/${projectId}/pitch-deck-handoff-reviews/${standardReview.review.id}/notes`, {
     method: "POST",
     body: JSON.stringify({ note: "Smoke pitch deck handoff review note" })

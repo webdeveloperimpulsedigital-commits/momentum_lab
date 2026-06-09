@@ -1447,8 +1447,9 @@ export async function generatePitchDeckHandoff(
     query:
       input.query ||
       `Create pitch deck handoff from campaign blueprint: ${blueprint.blueprint_title}`.slice(0, 280),
-    max_total_chunks: Math.min(input.max_total_chunks ?? 18, 18),
-    max_characters: Math.min(input.max_characters ?? 12000, 12000)
+    max_chunks_per_section: Math.min(input.max_chunks_per_section ?? 4, 4),
+    max_total_chunks: Math.min(input.max_total_chunks ?? 12, 12),
+    max_characters: Math.min(input.max_characters ?? 8000, 8000)
   });
   if (!contextPack) return null;
 
@@ -1466,7 +1467,41 @@ export async function generatePitchDeckHandoff(
     audienceType,
     userInstruction: input.user_instruction
   });
-  const llmResult = await generateStructuredText({ ...prompt, purpose: "pitch_deck_handoff" });
+  const promptCharacters = prompt.system.length + prompt.user.length;
+  const promptTokenEstimate = Math.ceil(promptCharacters / 4);
+  const contextSectionCounts = Object.fromEntries(
+    contextPack.sections.map((section) => [section.key, section.chunks.length])
+  );
+  console.info(
+    JSON.stringify({
+      event: "pitch_deck_handoff_generation_prepare",
+      project_id: projectId,
+      handoff_type: handoffType,
+      deck_depth: deckDepth,
+      audience_type: audienceType,
+      context_total_chunks: contextPack.total_chunks,
+      context_total_characters: contextPack.total_characters,
+      context_mandatory_rules_found: contextPack.mandatory_rules_found,
+      context_section_counts: contextSectionCounts,
+      prompt_characters: promptCharacters,
+      prompt_token_estimate: promptTokenEstimate
+    })
+  );
+  const llmResult = await generateStructuredText({
+    ...prompt,
+    purpose: "pitch_deck_handoff",
+    metadata: {
+      project_id: projectId,
+      handoff_type: handoffType,
+      deck_depth: deckDepth,
+      audience_type: audienceType,
+      context_total_chunks: contextPack.total_chunks,
+      context_total_characters: contextPack.total_characters,
+      context_mandatory_rules_found: contextPack.mandatory_rules_found,
+      prompt_characters: promptCharacters,
+      prompt_token_estimate: promptTokenEstimate
+    }
+  });
 
   let parsed;
   try {

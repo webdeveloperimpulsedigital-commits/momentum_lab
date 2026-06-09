@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Download, FileText, LayoutDashboard, Plus, Save, Search, Trash2 } from "lucide-react";
+import { LayoutDashboard, Plus, Save, Search, Trash2 } from "lucide-react";
 import {
   BRAVERY_LEVELS,
   BLUEPRINT_DEPTHS,
@@ -36,7 +36,7 @@ import {
   type ShortlistedIdea
 } from "@momentum-lab/shared";
 import { api } from "../api";
-import { FilterSelect, SearchResults, SourceForm } from "./KnowledgeVault";
+import { FilterSelect, SearchResults, SourceManager } from "./KnowledgeVault";
 import type { ProjectSource, SourceInput, SourceSearchResult } from "@momentum-lab/shared";
 
 const blankWorkspace: ProjectWorkspaceData = {
@@ -849,17 +849,6 @@ function ProjectSourceSearch({ projectId }: { projectId: string }) {
   );
 }
 
-const initialSourceDraft: SourceInput = {
-  title: "",
-  description: "",
-  source_role: "context",
-  source_type: "text",
-  tags: [],
-  source_status: "active",
-  source_url: "",
-  content_text: ""
-};
-
 function ProjectSourcesSection({
   projectId,
   sources,
@@ -869,156 +858,24 @@ function ProjectSourcesSection({
   sources: ProjectSource[];
   onChange: () => Promise<void>;
 }) {
-  const [draft, setDraft] = useState<SourceInput>(initialSourceDraft);
-  const [file, setFile] = useState<File | null>(null);
-  const [editing, setEditing] = useState<Record<string, SourceInput>>({});
-  const [sourcePreviews, setSourcePreviews] = useState<Record<string, string>>({});
-
-  const addSource = async (event: FormEvent) => {
-    event.preventDefault();
-    if (file) {
-      await api.uploadProjectSource(projectId, draft, file);
-    } else {
-      await api.createProjectSource(projectId, draft);
-    }
-    setDraft(initialSourceDraft);
-    setFile(null);
-    await onChange();
-  };
-
   return (
-    <section className="workspace-section">
-      <SectionTitle title="Project Sources" />
-      <SourceForm
-        draft={draft}
-        setDraft={setDraft}
-        onSubmit={addSource}
-        submitLabel={file ? "Upload source" : "Add source"}
-        file={file}
-        setFile={setFile}
-      />
-      <div className="space-y-3">
-        {sources.map((source) => {
-          const current = editing[source.id] ?? projectSourceToInput(source);
-          return (
-            <article className="workspace-item" key={source.id}>
-              <SourceForm
-                draft={current}
-                setDraft={(next) =>
-                  setEditing((existing) => ({
-                    ...existing,
-                    [source.id]: typeof next === "function" ? next(current) : next
-                  }))
-                }
-                onSubmit={async (event) => {
-                  event.preventDefault();
-                  await api.updateProjectSource(projectId, source.id, current);
-                  await onChange();
-                }}
-                submitLabel="Save"
-              />
-              {source.file_name ? (
-                <p className="text-sm text-slate-400">
-                  {source.file_name} · {source.mime_type || source.file_type || "unknown type"} ·{" "}
-                  {source.file_size ? `${Math.round(source.file_size / 1024)} KB` : "unknown size"}
-                </p>
-              ) : null}
-              <div className="flex flex-wrap gap-2 text-xs text-slate-400">
-                <span className="stage-pill">{source.processing_status}</span>
-                <span className="stage-pill">
-                  {source.extracted_text_available
-                    ? `${source.extracted_character_count} chars extracted`
-                    : "No extracted text"}
-                </span>
-                {source.processing_error ? <span className="text-red-300">{source.processing_error}</span> : null}
-                <span className="stage-pill">{source.embedding_status}</span>
-                <span className="stage-pill">{source.embedded_chunk_count} chunks embedded</span>
-                {source.failed_embedding_count ? <span className="text-red-300">{source.failed_embedding_count} failed</span> : null}
-                {source.embedding_model ? <span className="stage-pill">{source.embedding_model}</span> : null}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  className="btn-secondary"
-                  type="button"
-                  onClick={() => api.processProjectSource(projectId, source.id).then(onChange)}
-                >
-                  <FileText size={16} />
-                  Process
-                </button>
-                {source.extracted_text_available ? (
-                  <button
-                    className="btn-secondary"
-                    type="button"
-                    onClick={async () => {
-                      const { content } = await api.getProjectSourceContent(projectId, source.id);
-                      setSourcePreviews((current) => ({
-                        ...current,
-                        [source.id]: content.extracted_text_preview
-                      }));
-                    }}
-                  >
-                    Preview text
-                  </button>
-                ) : null}
-                {source.extracted_text_available ? (
-                  <>
-                    <button
-                      className="btn-secondary"
-                      type="button"
-                      onClick={() => api.embedProjectSource(projectId, source.id).then(onChange)}
-                    >
-                      Embed source
-                    </button>
-                    <button
-                      className="btn-secondary"
-                      type="button"
-                      onClick={() => api.embedProjectSource(projectId, source.id, true).then(onChange)}
-                    >
-                      Re-embed source
-                    </button>
-                  </>
-                ) : null}
-              </div>
-              {sourcePreviews[source.id] ? (
-                <pre className="max-h-56 overflow-auto whitespace-pre-wrap border border-line bg-ink/50 p-3 text-xs leading-5 text-slate-300">
-                  {sourcePreviews[source.id]}
-                </pre>
-              ) : null}
-              {source.storage_path ? (
-                <button
-                  className="btn-secondary"
-                  type="button"
-                  onClick={async () => {
-                    const { signedUrl } = await api.getProjectSourceDownloadUrl(projectId, source.id);
-                    window.open(signedUrl, "_blank", "noopener,noreferrer");
-                  }}
-                >
-                  <Download size={16} />
-                  Download
-                </button>
-              ) : null}
-              <button className="btn-secondary" type="button" onClick={() => api.archiveProjectSource(projectId, source.id).then(onChange)}>
-                Archive
-              </button>
-            </article>
-          );
-        })}
-      </div>
-    </section>
+    <SourceManager
+      scope="project"
+      title="Upload project files"
+      listTitle="Project source list"
+      emptyText="No project sources have been added yet."
+      sources={sources}
+      onReload={onChange}
+      uploadFile={(input, file) => api.uploadProjectSource(projectId, input, file)}
+      createSource={(input) => api.createProjectSource(projectId, input)}
+      updateSource={(sourceId, input) => api.updateProjectSource(projectId, sourceId, input)}
+      archiveSource={(sourceId) => api.archiveProjectSource(projectId, sourceId)}
+      processSource={(sourceId) => api.processProjectSource(projectId, sourceId)}
+      embedSource={(sourceId, force) => api.embedProjectSource(projectId, sourceId, force)}
+      getContent={(sourceId) => api.getProjectSourceContent(projectId, sourceId)}
+      getDownloadUrl={(sourceId) => api.getProjectSourceDownloadUrl(projectId, sourceId)}
+    />
   );
-}
-
-function projectSourceToInput(source: ProjectSource): SourceInput {
-  return {
-    title: source.title,
-    description: source.description ?? "",
-    source_role: source.source_role,
-    source_type: source.source_type,
-    tags: source.tags ?? [],
-    source_status: source.source_status,
-    source_url: source.source_url ?? "",
-    content_text: source.content_text ?? ""
-  };
 }
 
 function projectToDraft(project: Project) {
