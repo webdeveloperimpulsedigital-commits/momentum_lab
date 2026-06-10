@@ -362,9 +362,11 @@ async function orchestrateProjectChat(
   content: string
 ): Promise<{ content: string; messageType: ProjectMessage["message_type"]; modelUsed: string | null }> {
   const command = classifyProjectChatCommand(content);
+
   if (command === "research") {
     return runProjectResearchFromChat(userId, project, content);
   }
+
   if (command === "dossier") {
     const result = await generateProjectDossier(userId, project.id, {
       query: content.slice(0, 300),
@@ -390,7 +392,8 @@ async function orchestrateProjectChat(
       modelUsed: result.dossier.model_name
     };
   }
-  if (command === "ideas") {
+
+  if (command === "ideas" || command === "ideas_edit") {
     const bravery = inferBraveryLevel(content, project.bravery_level ?? "Sharp");
     const count = inferIdeaCount(content);
     const result = await generateProjectIdeaCards(userId, project.id, {
@@ -419,49 +422,518 @@ async function orchestrateProjectChat(
       modelUsed: llmSettings().model
     };
   }
-  if (command === "blueprint") {
-    return {
-      content:
-        "[CLIENT INPUT NEEDED]\nI can create the campaign blueprint once a final campaign truth is selected. Tell me which developed route is final, or use the advanced route/final truth controls below to lock it.",
-      messageType: "normal_chat",
-      modelUsed: null
-    };
+
+  if (command === "route") {
+    return runRouteDevelopmentFromChat(userId, project, content);
   }
+
+  if (command === "blueprint") {
+    return runBlueprintFromChat(userId, project, content);
+  }
+
   if (command === "handoff") {
+    return runHandoffFromChat(userId, project, content);
+  }
+
+  if (command === "handoff_review") {
+    return runHandoffReviewFromChat(userId, project, content);
+  }
+
+  if (command === "final_truth") {
     return {
-      content:
-        "[CLIENT INPUT NEEDED]\nI can create the pitch deck handoff after there is a campaign blueprint. If the blueprint exists, tell me which one to use.",
+      content: [
+        "[CLIENT INPUT NEEDED]",
+        "To lock a final campaign truth, I need to know which developed route won.",
+        "",
+        "Tell me:",
+        "- The name or number of the route you want to select.",
+        "- Why this route won (optional but useful).",
+        "- What proof is still required.",
+        "",
+        "You can also use the Advanced workflow controls below to select the route and lock the final truth directly."
+      ].join("\n"),
       messageType: "normal_chat",
       modelUsed: null
     };
   }
 
   return {
-    content: [
-      "I’m ready. Give me client context, upload files, or ask for the next creative move.",
-      "",
-      "Useful next commands:",
-      "- Browse the client and category before ideation.",
-      "- Generate a dossier.",
-      "- Give me 15 thought starters in Wild mode.",
-      "- Red-team the shortlisted ideas.",
-      "",
-      "How brave should this round be: Safe, Sharp, Bold, Wild, or Chaos first?"
-    ].join("\n"),
+    content: buildDefaultChatResponse(project),
     messageType: "normal_chat",
     modelUsed: null
   };
 }
 
+function buildDefaultChatResponse(project: Project) {
+  const client = project.client_name ? `the ${project.client_name} brief` : "this project";
+  return [
+    `Ready. Here is what I can do next for ${client}:`,
+    "",
+    "Research:",
+    "- Browse the client and category before ideation.",
+    "- Find what competitors are saying (and not saying).",
+    "- Run deep research on this category.",
+    "",
+    "Ideation:",
+    "- Generate a dossier.",
+    `- Give me 15 thought starters in ${project.bravery_level || "Sharp"} mode.`,
+    "- Give me the wildest version of the shortlisted ideas.",
+    "",
+    "Development:",
+    "- Develop idea 3 into a campaign route.",
+    "- Red-team the strongest route.",
+    "- Create the campaign blueprint.",
+    "- Create the pitch deck handoff.",
+    "",
+    `How brave should this round be: Safe, Sharp, Bold, Wild, or Chaos first?`
+  ].join("\n");
+}
+
+async function runRouteDevelopmentFromChat(
+  userId: string,
+  project: Project,
+  content: string
+): Promise<{ content: string; messageType: ProjectMessage["message_type"]; modelUsed: string | null }> {
+  if (!supabaseAdminClient) {
+    return {
+      content: [
+        "[CLIENT INPUT NEEDED]",
+        "To develop a route from chat I need a project source or idea to work from.",
+        "Upload files, generate ideas first, or specify which idea you want to develop."
+      ].join("\n"),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  // Try to find the most recent idea card to develop
+  const { data: cards } = await supabaseAdminClient
+    .from("project_idea_cards")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  const targetCard = (cards as ProjectIdeaCard[] | null)?.[0] ?? null;
+  if (!targetCard) {
+    return {
+      content: [
+        "[CLIENT INPUT NEEDED]",
+        "I need thought starters before I can develop a route. Ask me to generate ideas first.",
+        "",
+        "Example: \"Give me 10 thought starters in Bold mode.\""
+      ].join("\n"),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  try {
+    const result = await developProjectRoute(userId, project.id, {
+      query: `Develop campaign route from idea: ${targetCard.title}`,
+      idea_card_id: targetCard.id,
+      route_depth: inferRouteDepth(content),
+      user_instruction: content.slice(0, 600),
+      retrieval_scope: "project_plus_global",
+      retrieval_mode: "semantic",
+      source_roles: [...SOURCE_ROLE_VALUES],
+      source_types: ["text", "markdown", "pdf", "docx", "note", "transcript", "url", "other"],
+      max_total_chunks: 18,
+      max_characters: 12000
+    });
+    if (!result) {
+      return {
+        content:
+          "[CLIENT INPUT NEEDED]\nRoute development could not complete. The idea card may be missing context. Try generating a dossier first.",
+        messageType: "normal_chat",
+        modelUsed: null
+      };
+    }
+    return {
+      content: formatRouteChatResponse(result.route),
+      messageType: "route_development",
+      modelUsed: llmSettings().model
+    };
+  } catch (error) {
+    return {
+      content:
+        "[NOT READY FOR CLIENT]\n" +
+        (error instanceof Error ? error.message : "Route development failed. Check project context and try again."),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+}
+
+async function runBlueprintFromChat(
+  userId: string,
+  project: Project,
+  content: string
+): Promise<{ content: string; messageType: ProjectMessage["message_type"]; modelUsed: string | null }> {
+  if (!supabaseAdminClient) {
+    return {
+      content:
+        "[CLIENT INPUT NEEDED]\nI can create the campaign blueprint once a final campaign truth is selected. Use the Advanced workflow controls below to lock the final truth first.",
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  // Find the active final campaign truth
+  const { data: finalTruth } = await supabaseAdminClient
+    .from("final_campaign_truths")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (!finalTruth) {
+    return {
+      content: [
+        "[CLIENT INPUT NEEDED]",
+        "I need a selected final campaign truth before I can build the blueprint.",
+        "",
+        "To select one:",
+        "1. Generate and develop ideas using the chat.",
+        "2. Use the Advanced workflow controls below to lock a final route.",
+        "3. Then ask me to create the campaign blueprint."
+      ].join("\n"),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  try {
+    const result = await generateCampaignBlueprint(userId, project.id, {
+      query: `Campaign blueprint for: ${project.project_name}`,
+      final_selection_id: finalTruth.id,
+      blueprint_depth: "Standard blueprint",
+      user_instruction: content.slice(0, 600),
+      retrieval_scope: "project_plus_global",
+      retrieval_mode: "semantic",
+      source_roles: [...SOURCE_ROLE_VALUES],
+      source_types: ["text", "markdown", "pdf", "docx", "note", "transcript", "url", "other"],
+      max_total_chunks: 18,
+      max_characters: 12000
+    });
+    if (!result) {
+      return {
+        content:
+          "[CLIENT INPUT NEEDED]\nBlueprint generation could not complete. The final campaign truth may be missing a developed route. Use the Advanced workflow controls to link the route.",
+        messageType: "normal_chat",
+        modelUsed: null
+      };
+    }
+    return {
+      content: formatBlueprintChatResponse(result.blueprint),
+      messageType: "route_development",
+      modelUsed: llmSettings().model
+    };
+  } catch (error) {
+    return {
+      content:
+        "[NOT READY FOR CLIENT]\n" +
+        (error instanceof Error ? error.message : "Blueprint generation failed. Check project context and try again."),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+}
+
+async function runHandoffFromChat(
+  userId: string,
+  project: Project,
+  content: string
+): Promise<{ content: string; messageType: ProjectMessage["message_type"]; modelUsed: string | null }> {
+  if (!supabaseAdminClient) {
+    return {
+      content:
+        "[CLIENT INPUT NEEDED]\nI can create the pitch deck handoff once there is a campaign blueprint. Create the blueprint first.",
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  const { data: blueprints } = await supabaseAdminClient
+    .from("project_campaign_blueprints")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  const blueprint = (blueprints as CampaignBlueprint[] | null)?.[0] ?? null;
+  if (!blueprint) {
+    return {
+      content: [
+        "[CLIENT INPUT NEEDED]",
+        "I need a campaign blueprint before I can create the pitch deck handoff.",
+        "",
+        "Ask me: \"Create the campaign blueprint.\" — then come back for the handoff."
+      ].join("\n"),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  const { data: finalTruth } = await supabaseAdminClient
+    .from("final_campaign_truths")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (!finalTruth) {
+    return {
+      content:
+        "[CLIENT INPUT NEEDED]\nI have a blueprint but I need a final campaign truth linked to it. Lock the final route in the Advanced controls, then ask again.",
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  try {
+    const result = await generatePitchDeckHandoff(userId, project.id, {
+      query: `Pitch deck handoff for: ${project.project_name}`,
+      campaign_blueprint_id: blueprint.id,
+      final_selection_id: finalTruth.id,
+      handoff_type: "Client pitch structure",
+      deck_depth: "Standard deck",
+      audience_type: "Client leadership",
+      user_instruction: content.slice(0, 600),
+      retrieval_scope: "project_plus_global",
+      retrieval_mode: "semantic",
+      source_roles: [...SOURCE_ROLE_VALUES],
+      source_types: ["text", "markdown", "pdf", "docx", "note", "transcript", "url", "other"],
+      max_total_chunks: 18,
+      max_characters: 12000
+    });
+    if (!result) {
+      return {
+        content:
+          "[CLIENT INPUT NEEDED]\nHandoff generation could not complete. Check that the blueprint and final campaign truth are fully formed.",
+        messageType: "normal_chat",
+        modelUsed: null
+      };
+    }
+    return {
+      content: formatHandoffChatResponse(result.handoff),
+      messageType: "export",
+      modelUsed: llmSettings().model
+    };
+  } catch (error) {
+    return {
+      content:
+        "[NOT READY FOR CLIENT]\n" +
+        (error instanceof Error ? error.message : "Handoff generation failed. Check project context and try again."),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+}
+
+async function runHandoffReviewFromChat(
+  userId: string,
+  project: Project,
+  content: string
+): Promise<{ content: string; messageType: ProjectMessage["message_type"]; modelUsed: string | null }> {
+  if (!supabaseAdminClient) {
+    return {
+      content:
+        "[CLIENT INPUT NEEDED]\nI can review the handoff once one has been generated. Ask me to create the pitch deck handoff first.",
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  const { data: handoffs } = await supabaseAdminClient
+    .from("project_pitch_deck_handoffs")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  const handoff = (handoffs as PitchDeckHandoff[] | null)?.[0] ?? null;
+  if (!handoff) {
+    return {
+      content: [
+        "[CLIENT INPUT NEEDED]",
+        "There is no pitch deck handoff to review yet.",
+        "",
+        "Ask me: \"Create the pitch deck handoff.\" — then I can run the client-readiness review."
+      ].join("\n"),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  const { data: blueprints } = await supabaseAdminClient
+    .from("project_campaign_blueprints")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const blueprint = (blueprints as CampaignBlueprint[] | null)?.[0] ?? null;
+
+  const { data: finalTruth } = await supabaseAdminClient
+    .from("final_campaign_truths")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (!blueprint || !finalTruth) {
+    return {
+      content:
+        "[CLIENT INPUT NEEDED]\nI need both a campaign blueprint and a final campaign truth to review the handoff. Check the Advanced workflow controls to ensure both are set.",
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  try {
+    const result = await generatePitchDeckHandoffReview(userId, project.id, {
+      query: `Client-readiness review for: ${project.project_name}`,
+      pitch_deck_handoff_id: handoff.id,
+      review_mode: "Standard client-readiness review",
+      user_instruction: content.slice(0, 600),
+      retrieval_scope: "project_plus_global",
+      retrieval_mode: "semantic",
+      source_roles: [...SOURCE_ROLE_VALUES],
+      source_types: ["text", "markdown", "pdf", "docx", "note", "transcript", "url", "other"],
+      max_total_chunks: 18,
+      max_characters: 12000
+    });
+    if (!result) {
+      return {
+        content:
+          "[CLIENT INPUT NEEDED]\nHandoff review could not complete. Make sure a handoff and blueprint are fully formed.",
+        messageType: "normal_chat",
+        modelUsed: null
+      };
+    }
+    return {
+      content: formatHandoffReviewChatResponse(result.review),
+      messageType: "critique",
+      modelUsed: llmSettings().model
+    };
+  } catch (error) {
+    return {
+      content:
+        "[NOT READY FOR CLIENT]\n" +
+        (error instanceof Error ? error.message : "Handoff review failed. Check project context and try again."),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+}
+
+function inferRouteDepth(content: string) {
+  if (/\bdeep|full|detailed|exhaustive\b/i.test(content)) return "Deep route" as const;
+  if (/\blight|quick|fast|sketch\b/i.test(content)) return "Light route" as const;
+  return "Standard route" as const;
+}
+
+function formatRouteChatResponse(route: DevelopedRoute) {
+  return [
+    `[PROJECT SOURCE] Route developed: ${route.route_title || route.route_name}`,
+    "",
+    route.route_summary || route.core_campaign_thought || route.core_thought || "",
+    "",
+    route.audience_tension ? `Audience tension: ${route.audience_tension}` : "",
+    route.brand_product_truth ? `Product truth: ${route.brand_product_truth}` : "",
+    route.risks ? `Watchouts: ${route.risks}` : "",
+    "",
+    "The route has been saved. Next: red-team it, ask for the sellable version, or proceed to campaign blueprint."
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatBlueprintChatResponse(blueprint: CampaignBlueprint) {
+  const pillars = (blueprint.execution_pillars as Array<{ pillar_name?: string; what_it_does?: string }> | undefined) ?? [];
+  return [
+    `[PROJECT SOURCE] Campaign blueprint created: ${blueprint.blueprint_title}`,
+    "",
+    blueprint.selected_campaign_truth || "",
+    "",
+    pillars.length
+      ? `Execution pillars:\n${pillars.slice(0, 4).map((p) => `- ${p.pillar_name || ""}: ${p.what_it_does || ""}`).join("\n")}`
+      : "",
+    "",
+    "Blueprint saved. Next: create the pitch deck handoff, or ask me to review the blueprint for client-readiness."
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatHandoffChatResponse(handoff: PitchDeckHandoff) {
+  const slides = (handoff.slide_structure as Array<{ slide_title?: string }> | undefined) ?? [];
+  return [
+    `[PROJECT SOURCE] Pitch deck handoff created.`,
+    handoff.handoff_type ? `Type: ${handoff.handoff_type}` : "",
+    "",
+    slides.length
+      ? `Slides:\n${slides.slice(0, 8).map((s, i) => `${i + 1}. ${s.slide_title || "Slide"}`).join("\n")}`
+      : "",
+    "",
+    "Handoff saved. Next: ask me to review the handoff for client-readiness."
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatHandoffReviewChatResponse(review: PitchDeckHandoffReview) {
+  return [
+    `[PROJECT SOURCE] Pitch deck handoff review complete.`,
+    `Overall readiness: ${review.client_readiness_status}`,
+    review.overall_readiness_verdict ? `Verdict: ${review.overall_readiness_verdict}` : "",
+    review.narrative_strength_assessment ? `\n${review.narrative_strength_assessment}` : "",
+    review.recommended_fixes?.length
+      ? `\nRecommended fixes:\n${review.recommended_fixes.slice(0, 3).map((f) => `- ${f}`).join("\n")}`
+      : "",
+    "",
+    "Review saved. Use the Advanced workflow controls to see the full slide-by-slide breakdown."
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function classifyProjectChatCommand(content: string) {
   const text = content.toLowerCase();
-  if (/\b(browse|live web|web research|research|competitor|competitors|category scan|market scan|precedent|proof verification|verify|client website)\b/.test(text)) {
+
+  // Live web research — must come first to avoid false dossier/ideas matches
+  if (/\b(browse|live web|web research|research|competitor(s)?|category scan|market scan|precedent|proof verif|verify|client website|what (are|is) (competitors?|the category|others)|latest|current|find what|topical|calendar opportunity|platform behaviour|cultural (signal|moment)|sector shift|market shift)\b/.test(text)) {
     return "research";
   }
-  if (/\b(dossier|intelligence brief|creative intelligence)\b/.test(text)) return "dossier";
-  if (/\b(thought starters?|ideas?|ideate|generate|make idea|combine|stranger|wild mode|chaos)\b/.test(text)) return "ideas";
-  if (/\b(blueprint|campaign blueprint|campaign truth)\b/.test(text)) return "blueprint";
-  if (/\b(handoff|pitch deck|ppt|deck review|client-readiness|client readiness)\b/.test(text)) return "handoff";
+
+  // Dossier
+  if (/\b(dossier|intelligence brief|creative intelligence brief)\b/.test(text)) return "dossier";
+
+  // Reject / shortlist / combine / mutate ideas
+  if (/\b(kill idea|remove (all )?(safe|sharp|bold|wild|chaos)|reject idea|kill (idea )?\d+|shortlist|combine ideas?|combine \d+ and \d+|make idea \d+|make it (stranger|more|less)|make this (more|less)|mutate idea|take the .* angle from|what.s the (wildest|safer|sellable|cheaper|indian|b2b|pr|trade show) version)\b/.test(text)) {
+    return "ideas_edit";
+  }
+
+  // Route development / red-team
+  if (/\b(develop (idea|route|it)|deepen (idea|route)|route development|turn this into|red.?team|red team|critique (this|the route)|stress test|sharper version|wilder version|safer version|sellable version|campaign route)\b/.test(text)) {
+    return "route";
+  }
+
+  // Blueprint
+  if (/\b(blueprint|campaign blueprint)\b/.test(text)) return "blueprint";
+
+  // Pitch deck handoff
+  if (/\b(handoff|pitch deck|ppt|create the (final|pitch|deck))\b/.test(text)) return "handoff";
+
+  // Pitch deck review
+  if (/\b(deck review|review (the )?handoff|client.?readiness|review (for )?client|ready for client)\b/.test(text)) return "handoff_review";
+
+  // Final campaign truth
+  if (/\b(final (campaign )?truth|final route|create the campaign truth|campaign platform)\b/.test(text)) return "final_truth";
+
+  // Thought starters / ideation
+  if (/\b(thought starters?|give me \d+|ideas?|ideate|generate (ideas?|thought)|make idea|wild mode|chaos (first|mode)|bravery|how brave)\b/.test(text)) return "ideas";
+
   return "chat";
 }
 

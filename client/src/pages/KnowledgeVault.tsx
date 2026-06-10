@@ -266,30 +266,22 @@ export function SourceManager({
         <div>
           <h2 className="text-lg font-semibold text-white">{title}</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Drop files here or use a secondary action for pasted text and URLs.
+            Drop files to add them. Processing starts automatically.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
-            className={activeAction === "files" ? "btn-primary" : "btn-secondary"}
-            type="button"
-            onClick={() => setActiveAction("files")}
-          >
-            <Upload size={16} />
-            Upload files
-          </button>
-          <button
             className={activeAction === "text" ? "btn-primary" : "btn-secondary"}
             type="button"
-            onClick={() => setActiveAction("text")}
+            onClick={() => setActiveAction(activeAction === "text" ? "files" : "text")}
           >
             <FileText size={16} />
-            Add text manually
+            Paste text
           </button>
           <button
             className={activeAction === "url" ? "btn-primary" : "btn-secondary"}
             type="button"
-            onClick={() => setActiveAction("url")}
+            onClick={() => setActiveAction(activeAction === "url" ? "files" : "url")}
           >
             <LinkIcon size={16} />
             Add URL
@@ -297,10 +289,11 @@ export function SourceManager({
         </div>
       </div>
 
-      {activeAction === "files" ? (
+      {/* File drop zone — always visible unless text/url form is open */}
+      {activeAction !== "text" && activeAction !== "url" ? (
         <label
-          className={`block border border-dashed p-8 text-center transition ${
-            dragging ? "border-cobalt bg-cobalt/10" : "border-line bg-ink/30"
+          className={`block cursor-pointer border border-dashed p-8 text-center transition ${
+            dragging ? "border-cobalt bg-cobalt/10" : "border-line bg-ink/30 hover:border-slate-500"
           }`}
           onDragOver={(event) => {
             event.preventDefault();
@@ -311,14 +304,10 @@ export function SourceManager({
         >
           <Upload className="mx-auto text-slate-400" size={30} />
           <span className="mt-3 block text-sm font-semibold text-white">
-            Drag and drop files
+            {busy ? busy + "..." : "Drag files or click to upload"}
           </span>
           <span className="mt-1 block text-sm text-slate-400">
-            TXT, Markdown, PDF, DOCX, PNG, JPG, JPEG, and WebP up to 25 MB.
-          </span>
-          <span className="btn-secondary mt-5 inline-flex">
-            <Upload size={16} />
-            Upload files
+            TXT, Markdown, PDF, DOCX, images up to 25 MB — indexed automatically.
           </span>
           <input
             className="sr-only"
@@ -333,10 +322,9 @@ export function SourceManager({
       {activeAction === "text" ? (
         <form className="space-y-4 border border-line bg-ink/30 p-4" onSubmit={addText}>
           <Field
-            label="Title"
+            label="Title (optional)"
             value={textDraft.title}
             onChange={(value) => setTextDraft((current) => ({ ...current, title: value }))}
-            required
           />
           <Field
             label="Text"
@@ -345,10 +333,15 @@ export function SourceManager({
             textarea
             required
           />
-          <button className="btn-primary" disabled={Boolean(busy)}>
-            <Plus size={17} />
-            Add text source
-          </button>
+          <div className="flex gap-2">
+            <button className="btn-primary" disabled={Boolean(busy)}>
+              <Plus size={17} />
+              Add to vault
+            </button>
+            <button className="btn-secondary" type="button" onClick={() => setActiveAction("files")}>
+              Cancel
+            </button>
+          </div>
         </form>
       ) : null}
 
@@ -361,19 +354,24 @@ export function SourceManager({
             required
           />
           <Field
-            label="Title"
+            label="Title (optional)"
             value={urlDraft.title}
             onChange={(value) => setUrlDraft((current) => ({ ...current, title: value }))}
           />
-          <button className="btn-primary" disabled={Boolean(busy)}>
-            <Plus size={17} />
-            Add URL source
-          </button>
+          <div className="flex gap-2">
+            <button className="btn-primary" disabled={Boolean(busy)}>
+              <Plus size={17} />
+              Add to vault
+            </button>
+            <button className="btn-secondary" type="button" onClick={() => setActiveAction("files")}>
+              Cancel
+            </button>
+          </div>
         </form>
       ) : null}
 
       {message ? <p className="text-sm text-slate-300">{message}</p> : null}
-      {busy ? <p className="text-sm text-slate-400">{busy}...</p> : null}
+      {busy && activeAction === "files" ? <p className="text-sm text-slate-400">{busy}...</p> : null}
 
       <div className="border-t border-line pt-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -638,27 +636,32 @@ export function FilterSelect({
 }
 
 function SourceStatusLine({ source }: { source: ManagedSource }) {
-  const processingLabel = processingStatusLabel(source.processing_status);
-  const extractionLabel = source.extracted_text_available
-    ? "File read"
-    : source.processing_status === "failed"
-      ? "Needs attention"
-      : source.processing_status === "not_processed"
-        ? "Waiting to read"
-        : "Reading file";
-  const indexingLabel = embeddingStatusLabel(source.embedding_status, source.embedded_chunk_count);
+  const status = plainVaultStatus(source);
+  const isError = status === "Needs attention" || status === "Failed";
+  const isReady = status === "Ready";
 
   return (
-    <div className="flex flex-wrap gap-2 text-xs text-slate-400">
-      <span className="stage-pill">{processingLabel}</span>
-      <span className="stage-pill">{extractionLabel}</span>
-      <span className="stage-pill">{indexingLabel}</span>
-      {source.processing_error ? <span className="text-red-300">{source.processing_error}</span> : null}
-      {source.embedding_error ? <span className="text-red-300">{source.embedding_error}</span> : null}
-      {source.failed_embedding_count ? <span className="text-red-300">{source.failed_embedding_count} failed</span> : null}
-      {source.embedding_model ? <span className="stage-pill">{source.embedding_model}</span> : null}
+    <div className="flex flex-wrap items-center gap-2">
+      <span className={`stage-pill ${isReady ? "text-emerald-400" : isError ? "text-red-300" : ""}`}>
+        {status}
+      </span>
+      {isError && (source.processing_error || source.embedding_error) ? (
+        <span className="text-xs text-red-300">{source.processing_error || source.embedding_error}</span>
+      ) : null}
     </div>
   );
+}
+
+function plainVaultStatus(source: ManagedSource): string {
+  if (source.processing_status === "failed" || source.embedding_status === "failed") return "Needs attention";
+  if (source.processing_status === "unsupported") return "Unsupported format";
+  if (source.embedding_status === "embedded") return "Ready";
+  if (source.embedding_status === "embedding") return "Indexing";
+  if (source.embedding_status === "queued") return "Indexing";
+  if (source.processing_status === "processed") return "Indexing";
+  if (source.processing_status === "processing") return "Reading file";
+  if (source.processing_status === "queued") return "Reading file";
+  return "Uploading";
 }
 
 function SourceDetailsForm({
@@ -768,23 +771,6 @@ function sourceTypeFromFile(file: File): SourceType {
   return "other";
 }
 
-function processingStatusLabel(status: ManagedSource["processing_status"]) {
-  if (status === "not_processed") return "Uploaded";
-  if (status === "queued") return "Reading file";
-  if (status === "processing") return "Reading file";
-  if (status === "processed") return "Ready";
-  if (status === "unsupported") return "Needs review";
-  return "Failed";
-}
-
-function embeddingStatusLabel(status: ManagedSource["embedding_status"], embeddedChunks: number) {
-  if (status === "not_embedded") return "Waiting to index";
-  if (status === "queued") return "Waiting to index";
-  if (status === "embedding") return "Indexing";
-  if (status === "embedded") return embeddedChunks ? "Ready" : "Ready";
-  if (status === "skipped") return "Needs attention";
-  return "Needs attention";
-}
 
 function formatDate(value: string | null) {
   if (!value) return "No upload date";

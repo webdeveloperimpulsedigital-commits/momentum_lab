@@ -1,4 +1,4 @@
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { FileUp, Globe2, LayoutDashboard, Paperclip, Plus, Save, Search, Send, Sparkles, Trash2 } from "lucide-react";
 import {
@@ -89,6 +89,25 @@ export function ProjectWorkspace() {
       .catch((error) => setError(error instanceof Error ? error.message : "Could not load workspace"))
       .finally(() => setLoading(false));
   }, [projectId]);
+
+  // Auto-poll while any project source is still processing or embedding
+  useEffect(() => {
+    if (!projectId) return undefined;
+    const hasPending = sources.some(
+      (s) =>
+        s.processing_status === "queued" ||
+        s.processing_status === "processing" ||
+        s.embedding_status === "queued" ||
+        s.embedding_status === "embedding"
+    );
+    if (!hasPending) return undefined;
+    const timer = window.setInterval(() => {
+      api.listProjectSources(projectId)
+        .then(({ sources: updated }) => setSources(updated))
+        .catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [projectId, sources]);
 
   const finalDraft = useMemo(
     () => ({
@@ -412,13 +431,73 @@ function ProjectChatCommandCenter({
     event.target.value = "";
   };
 
-  const nextActions = [
-    "Browse the client and category before ideation.",
-    "Generate a dossier.",
-    "Give me 15 thought starters in Wild mode.",
-    "Find what competitors are not saying.",
-    "Review the handoff for client-readiness."
-  ];
+  const hasSources = sources.length > 0;
+  const hasReadySources = sources.some((s) => s.embedding_status === "embedded");
+  const hasIdeas = outputs.routes.length > 0 || outputs.shortlistedIdeas.length > 0;
+  const hasBlueprint = outputs.campaignBlueprints.length > 0;
+  const hasHandoff = outputs.pitchDeckHandoffs.length > 0;
+  const hasFinalTruth = Boolean(outputs.finalTruth);
+  const isResearchRunning = sending && messages.at(-1)?.role === "user" && /browse|research|competitor|find what/i.test(messages.at(-1)?.content ?? "");
+
+  const nextActions = useMemo(() => {
+    if (!hasSources) {
+      return [
+        "Browse the client and category before ideation.",
+        project.client_name ? `Research ${project.client_name} and competitors.` : "Run standard research on this client.",
+        "Find what the category keeps repeating.",
+      ];
+    }
+    if (!hasReadySources) {
+      return [
+        "Browse the client and category before ideation.",
+        "Generate a dossier.",
+        `Give me 10 thought starters in ${project.bravery_level || "Sharp"} mode.`,
+      ];
+    }
+    if (!hasIdeas) {
+      return [
+        "Generate a dossier.",
+        `Give me 15 thought starters in ${project.bravery_level || "Wild"} mode.`,
+        "Browse competitors before ideation.",
+        "Find what competitors are not saying.",
+      ];
+    }
+    if (!hasFinalTruth) {
+      return [
+        "Give me the wildest version of the best ideas.",
+        "Develop idea 1 into a campaign route.",
+        "Red-team the strongest route.",
+        "What is the sellable version?",
+      ];
+    }
+    if (!hasBlueprint) {
+      return [
+        "Create the campaign blueprint.",
+        "Red-team the final route.",
+        "What proof is still needed?",
+      ];
+    }
+    if (!hasHandoff) {
+      return [
+        "Create the pitch deck handoff.",
+        "Review the blueprint for client-readiness.",
+      ];
+    }
+    return [
+      "Review the handoff for client-readiness.",
+      "Make the deck more Indian.",
+      "Make the deck more B2B.",
+      "Give me the safer version.",
+    ];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasSources, hasReadySources, hasIdeas, hasFinalTruth, hasBlueprint, hasHandoff, project.bravery_level, project.client_name]);
+
+  const threadRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (threadRef.current) {
+      threadRef.current.scrollTop = threadRef.current.scrollHeight;
+    }
+  }, [messages]);
 
   return (
     <section
@@ -465,7 +544,7 @@ function ProjectChatCommandCenter({
           ))}
         </div>
 
-        <div className="min-h-[320px] space-y-3 overflow-auto border border-line bg-ink/30 p-3">
+        <div ref={threadRef} className="min-h-[320px] space-y-3 overflow-auto border border-line bg-ink/30 p-3">
           {messages.length ? (
             messages.map((message) => <ChatMessageBubble message={message} key={message.id} />)
           ) : (
@@ -497,6 +576,9 @@ function ProjectChatCommandCenter({
           </button>
         </form>
         {chatError ? <p className="text-sm text-red-300">{chatError}</p> : null}
+        {isResearchRunning ? (
+          <p className="text-sm text-cobalt">Browsing the web... this may take 15–30 seconds.</p>
+        ) : null}
         {uploading || dragging ? (
           <p className="text-sm text-slate-400">
             {dragging ? "Drop files to add them to this project." : "Uploading, reading, and indexing files..."}
@@ -555,26 +637,92 @@ function ProjectChatCommandCenter({
 
 function ChatMessageBubble({ message }: { message: ProjectMessage }) {
   const roleLabel = message.role === "assistant" ? "Momentum Lab" : "Adwait";
+  const sources = extractWebSources(message.content);
+  const bodyText = sources.length ? stripSourcesBlock(message.content) : message.content;
+
   return (
     <article className={message.role === "user" ? "message user" : "message assistant"}>
-      <p className="message-role">{roleLabel}</p>
-      <p className="whitespace-pre-wrap leading-6">{linkifyText(message.content)}</p>
+      <p className="message-role">
+        {roleLabel}
+        {message.message_type && message.message_type !== "normal_chat" ? (
+          <span className="ml-2 text-xs text-slate-500">{messageTypeLabel(message.message_type)}</span>
+        ) : null}
+      </p>
+      <div className="whitespace-pre-wrap leading-6">{renderMessageContent(bodyText)}</div>
+      {sources.length ? (
+        <div className="mt-3 space-y-1 border-t border-line pt-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Web sources</p>
+          {sources.map((source, index) => (
+            <div key={index} className="flex items-start gap-2">
+              <span className="mt-0.5 shrink-0 text-xs text-slate-500">{index + 1}.</span>
+              <a
+                className="break-all text-xs text-cobalt underline hover:text-blue-300"
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {source.title || source.url}
+              </a>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </article>
   );
 }
 
-function linkifyText(content: string) {
-  const parts = content.split(/(https?:\/\/[^\s)]+)/g);
+function messageTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    research_dossier: "[LIVE WEB SOURCE]",
+    thought_starters: "[IDEAS]",
+    shortlist: "[SHORTLIST]",
+    route_development: "[ROUTE]",
+    final_route: "[FINAL ROUTE]",
+    critique: "[CRITIQUE]",
+    export: "[HANDOFF]"
+  };
+  return labels[type] ?? "";
+}
+
+function renderMessageContent(content: string) {
+  // Render label tags with subtle highlight
+  const labelPattern = /(\[(?:LIVE WEB SOURCE|PROJECT SOURCE|GLOBAL SOURCE|ASSUMPTION|CLIENT INPUT NEEDED|CLAIM REQUIRES SOURCE|DATA POINT TO BE CONFIRMED|UNVERIFIED|WEB RESEARCH FAILED|LIMITED RESEARCH[^\]]*|NOT READY FOR CLIENT|VOICE ASSUMPTION|FEASIBILITY TO BE CHECKED)[^\]]*\])/g;
+  const parts = content.split(labelPattern);
   return parts.map((part, index) =>
-    /^https?:\/\//.test(part) ? (
-      <a className="text-cobalt underline" href={part} target="_blank" rel="noreferrer" key={`${part}-${index}`}>
+    labelPattern.test(part) ? (
+      <span key={index} className="rounded bg-slate-700/60 px-1 py-0.5 text-xs font-mono text-slate-300">
+        {part}
+      </span>
+    ) : /^https?:\/\//.test(part) ? (
+      <a className="text-cobalt underline" href={part} target="_blank" rel="noreferrer" key={index}>
         {part}
       </a>
     ) : (
-      <span key={`${part}-${index}`}>{part}</span>
+      <span key={index}>{part}</span>
     )
   );
 }
+
+function extractWebSources(content: string): Array<{ title: string; url: string }> {
+  const sourcesMatch = content.match(/\nSources:\n([\s\S]+)$/);
+  if (!sourcesMatch) return [];
+  return sourcesMatch[1]
+    .split("\n")
+    .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+    .filter(Boolean)
+    .map((line) => {
+      const urlMatch = line.match(/(https?:\/\/\S+)/);
+      const url = urlMatch ? urlMatch[1] : "";
+      const title = line.replace(/ - https?:\/\/\S+$/, "").replace(/https?:\/\/\S+/, "").trim() || url;
+      return { title, url };
+    })
+    .filter((s) => s.url);
+}
+
+function stripSourcesBlock(content: string) {
+  return content.replace(/\nSources:\n[\s\S]+$/, "").trimEnd();
+}
+
 
 function chatFileInput(file: File): SourceInput {
   return {
