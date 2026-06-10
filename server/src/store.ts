@@ -297,6 +297,7 @@ export async function listGlobalSources() {
   const { data, error } = await supabaseAdminClient
     .from("global_sources")
     .select("*")
+    .eq("source_status", "active")
     .order("updated_at", { ascending: false });
 
   if (error) throw error;
@@ -1804,6 +1805,7 @@ export async function listProjectSources(userId: string, projectId: string) {
     .from("project_sources")
     .select("*")
     .eq("project_id", projectId)
+    .eq("source_status", "active")
     .order("updated_at", { ascending: false });
 
   if (error) throw error;

@@ -92,6 +92,7 @@ export function KnowledgeVault() {
         createSource={(input) => api.createGlobalSource(input)}
         updateSource={(sourceId, input) => api.updateGlobalSource(sourceId, input)}
         archiveSource={(sourceId) => api.archiveGlobalSource(sourceId)}
+        onArchived={(sourceId) => setSources((current) => current.filter((source) => source.id !== sourceId))}
         processSource={(sourceId) => api.processGlobalSource(sourceId)}
         embedSource={(sourceId, force) => api.embedGlobalSource(sourceId, force)}
         getContent={(sourceId) => api.getGlobalSourceContent(sourceId)}
@@ -115,6 +116,7 @@ export function SourceManager({
   createSource,
   updateSource,
   archiveSource,
+  onArchived,
   processSource,
   embedSource,
   getContent,
@@ -131,6 +133,7 @@ export function SourceManager({
   createSource: (input: SourceInput) => Promise<{ source: ManagedSource }>;
   updateSource: (sourceId: string, input: Partial<SourceInput>) => Promise<{ source: ManagedSource }>;
   archiveSource: (sourceId: string) => Promise<{ source: ManagedSource }>;
+  onArchived?: (sourceId: string) => void;
   processSource: (sourceId: string) => Promise<{ source: ManagedSource }>;
   embedSource: (sourceId: string, force?: boolean) => Promise<{ source: ManagedSource }>;
   getContent: (sourceId: string) => Promise<{ content: { extracted_text_preview: string } }>;
@@ -230,7 +233,11 @@ export function SourceManager({
     setBusy(`Removing ${source.title}`);
     try {
       await archiveSource(source.id);
+      onArchived?.(source.id);
+      setMessage(`${source.title} removed from active sources`);
       await onReload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not delete source");
     } finally {
       setBusy(null);
     }

@@ -223,7 +223,12 @@ export function ProjectWorkspace() {
             <CreativeIntelligenceDossier projectId={projectId} />
             <ContextPackPreview projectId={projectId} />
             <ProjectSourceSearch projectId={projectId} />
-            <ProjectSourcesSection projectId={projectId} sources={sources} onChange={reloadSources} />
+            <ProjectSourcesSection
+              projectId={projectId}
+              sources={sources}
+              onArchived={(sourceId) => setSources((current) => current.filter((source) => source.id !== sourceId))}
+              onChange={reloadSources}
+            />
             <NotesSection projectId={projectId} workspace={workspace} onChange={reloadWorkspace} />
             <FinalTruthSection projectId={projectId} workspace={workspace} initialDraft={finalDraft} onChange={reloadWorkspace} />
             <CampaignBlueprintSection projectId={projectId} workspace={workspace} onChange={reloadWorkspace} />
@@ -852,10 +857,12 @@ function ProjectSourceSearch({ projectId }: { projectId: string }) {
 function ProjectSourcesSection({
   projectId,
   sources,
+  onArchived,
   onChange
 }: {
   projectId: string;
   sources: ProjectSource[];
+  onArchived: (sourceId: string) => void;
   onChange: () => Promise<void>;
 }) {
   return (
@@ -870,6 +877,7 @@ function ProjectSourcesSection({
       createSource={(input) => api.createProjectSource(projectId, input)}
       updateSource={(sourceId, input) => api.updateProjectSource(projectId, sourceId, input)}
       archiveSource={(sourceId) => api.archiveProjectSource(projectId, sourceId)}
+      onArchived={onArchived}
       processSource={(sourceId) => api.processProjectSource(projectId, sourceId)}
       embedSource={(sourceId, force) => api.embedProjectSource(projectId, sourceId, force)}
       getContent={(sourceId) => api.getProjectSourceContent(projectId, sourceId)}
