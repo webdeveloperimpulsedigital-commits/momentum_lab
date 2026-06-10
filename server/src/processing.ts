@@ -10,7 +10,12 @@ export interface ExtractionResult {
 }
 
 export function cleanText(text: string) {
-  return text.replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n").trim();
+  return text
+    .replace(/\u0000/g, "")
+    .replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
 }
 
 export function wordCount(text: string) {

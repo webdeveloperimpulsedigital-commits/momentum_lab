@@ -708,12 +708,12 @@ export async function createGlobalSource(userId: string, input: SourceInput) {
     .single();
 
   if (error) throw error;
-  await runAutomaticSourcePipeline({
+  void runAutomaticSourcePipeline({
     userId,
     scope: "global",
     sourceId: data.id
   });
-  return (await getGlobalSourceById(data.id)) ?? (data as GlobalSource);
+  return data as GlobalSource;
 }
 
 async function getGlobalSourceById(sourceId: string) {
@@ -736,94 +736,107 @@ async function processSourceRecord(input: {
   if (!supabaseAdminClient) return null;
 
   const table = input.scope === "global" ? "global_sources" : "project_sources";
-  const query = supabaseAdminClient.from(table).select("*").eq("id", input.sourceId);
-  if (input.scope === "project") query.eq("project_id", input.projectId!);
+  try {
+    const query = supabaseAdminClient.from(table).select("*").eq("id", input.sourceId);
+    if (input.scope === "project") query.eq("project_id", input.projectId!);
 
-  const { data: source, error } = await query.single();
-  if (error || !source) return null;
+    const { data: source, error } = await query.single();
+    if (error || !source) return null;
 
-  await supabaseAdminClient
-    .from(table)
-    .update({ processing_status: "processing", processing_error: null })
-    .eq("id", input.sourceId);
+    await supabaseAdminClient
+      .from(table)
+      .update({ processing_status: "processing", processing_error: null })
+      .eq("id", input.sourceId);
 
-  let fileBuffer: Buffer | undefined;
-  if (source.storage_bucket && source.storage_path) {
-    const download = await supabaseAdminClient.storage
-      .from(source.storage_bucket)
-      .download(source.storage_path);
-    if (download.error) {
-      await supabaseAdminClient
-        .from(table)
-        .update({
-          processing_status: "failed",
-          processing_error: "Stored file could not be read",
-          processed_at: now()
-        })
-        .eq("id", input.sourceId);
-      return null;
+    let fileBuffer: Buffer | undefined;
+    if (source.storage_bucket && source.storage_path) {
+      const download = await supabaseAdminClient.storage
+        .from(source.storage_bucket)
+        .download(source.storage_path);
+      if (download.error) {
+        await supabaseAdminClient
+          .from(table)
+          .update({
+            processing_status: "failed",
+            processing_error: "Stored file could not be read",
+            processed_at: now()
+          })
+          .eq("id", input.sourceId);
+        return null;
+      }
+      fileBuffer = Buffer.from(await download.data.arrayBuffer());
     }
-    fileBuffer = Buffer.from(await download.data.arrayBuffer());
-  }
 
-  const extraction = await extractSourceText({
-    sourceType: source.source_type,
-    contentText: source.content_text,
-    fileBuffer,
-    mimeType: source.mime_type ?? source.file_type,
-    fileName: source.file_name
-  });
+    const extraction = await extractSourceText({
+      sourceType: source.source_type,
+      contentText: source.content_text,
+      fileBuffer,
+      mimeType: source.mime_type ?? source.file_type,
+      fileName: source.file_name
+    });
 
-  const characterCount = extraction.text.length;
-  const words = wordCount(extraction.text);
-  const chunks = chunkText(extraction.text);
+    const characterCount = extraction.text.length;
+    const words = wordCount(extraction.text);
+    const chunks = chunkText(extraction.text);
 
-  await supabaseAdminClient.from("source_chunks").delete().match({
-    source_id: input.sourceId,
-    source_scope: input.scope
-  });
+    await supabaseAdminClient.from("source_chunks").delete().match({
+      source_id: input.sourceId,
+      source_scope: input.scope
+    });
 
-  await supabaseAdminClient.from("source_contents").upsert({
-    source_id: input.sourceId,
-    source_scope: input.scope,
-    project_id: input.scope === "project" ? input.projectId : null,
-    extracted_text: extraction.text,
-    extraction_method: extraction.method,
-    character_count: characterCount,
-    word_count: words,
-    processed_by: input.userId
-  });
-
-  if (chunks.length) {
-    const rows = chunks.map((chunk, index) => ({
+    await supabaseAdminClient.from("source_contents").upsert({
       source_id: input.sourceId,
       source_scope: input.scope,
       project_id: input.scope === "project" ? input.projectId : null,
-      chunk_index: index,
-      chunk_text: chunk,
-      character_count: chunk.length,
-      token_estimate: Math.ceil(chunk.length / 4)
-    }));
-    const chunkInsert = await supabaseAdminClient.from("source_chunks").insert(rows);
-    if (chunkInsert.error) throw chunkInsert.error;
+      extracted_text: extraction.text,
+      extraction_method: extraction.method,
+      character_count: characterCount,
+      word_count: words,
+      processed_by: input.userId
+    });
+
+    if (chunks.length) {
+      const rows = chunks.map((chunk, index) => ({
+        source_id: input.sourceId,
+        source_scope: input.scope,
+        project_id: input.scope === "project" ? input.projectId : null,
+        chunk_index: index,
+        chunk_text: chunk,
+        character_count: chunk.length,
+        token_estimate: Math.ceil(chunk.length / 4)
+      }));
+      const chunkInsert = await supabaseAdminClient.from("source_chunks").insert(rows);
+      if (chunkInsert.error) throw chunkInsert.error;
+    }
+
+    const update = await supabaseAdminClient
+      .from(table)
+      .update({
+        processing_status: extraction.status,
+        processing_error: extraction.safeError,
+        processed_at: now(),
+        extracted_text_available: Boolean(extraction.text),
+        extracted_character_count: characterCount,
+        detected_source_type: extraction.detectedType
+      })
+      .eq("id", input.sourceId)
+      .select("*")
+      .single();
+
+    if (update.error) throw update.error;
+    return update.data;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Text extraction failed for this source";
+    await supabaseAdminClient
+      .from(table)
+      .update({
+        processing_status: "failed",
+        processing_error: message,
+        processed_at: now()
+      })
+      .eq("id", input.sourceId);
+    throw error;
   }
-
-  const update = await supabaseAdminClient
-    .from(table)
-    .update({
-      processing_status: extraction.status,
-      processing_error: extraction.safeError,
-      processed_at: now(),
-      extracted_text_available: Boolean(extraction.text),
-      extracted_character_count: characterCount,
-      detected_source_type: extraction.detectedType
-    })
-    .eq("id", input.sourceId)
-    .select("*")
-    .single();
-
-  if (update.error) throw update.error;
-  return update.data;
 }
 
 export async function processGlobalSource(userId: string, sourceId: string) {
@@ -892,12 +905,12 @@ export async function createGlobalFileSource(
     .single();
 
   if (error) throw error;
-  await runAutomaticSourcePipeline({
+  void runAutomaticSourcePipeline({
     userId,
     scope: "global",
     sourceId
   });
-  return (await getGlobalSourceById(sourceId)) ?? (data as GlobalSource);
+  return data as GlobalSource;
 }
 
 export async function updateGlobalSource(sourceId: string, patch: Partial<SourceInput>) {

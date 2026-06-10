@@ -67,6 +67,23 @@ export function KnowledgeVault() {
     load().catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    const hasPendingSource = sources.some(
+      (source) =>
+        source.processing_status === "queued" ||
+        source.processing_status === "processing" ||
+        source.embedding_status === "queued" ||
+        source.embedding_status === "embedding"
+    );
+    if (!hasPendingSource) return undefined;
+
+    const timer = window.setInterval(() => {
+      load().catch(() => undefined);
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [sources]);
+
   return (
     <main className="mx-auto max-w-6xl px-5 py-8">
       <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
@@ -626,7 +643,9 @@ function SourceStatusLine({ source }: { source: ManagedSource }) {
     ? "File read"
     : source.processing_status === "failed"
       ? "Needs attention"
-      : "Reading file";
+      : source.processing_status === "not_processed"
+        ? "Waiting to read"
+        : "Reading file";
   const indexingLabel = embeddingStatusLabel(source.embedding_status, source.embedded_chunk_count);
 
   return (
@@ -759,8 +778,8 @@ function processingStatusLabel(status: ManagedSource["processing_status"]) {
 }
 
 function embeddingStatusLabel(status: ManagedSource["embedding_status"], embeddedChunks: number) {
-  if (status === "not_embedded") return "Indexing";
-  if (status === "queued") return "Indexing";
+  if (status === "not_embedded") return "Waiting to index";
+  if (status === "queued") return "Waiting to index";
   if (status === "embedding") return "Indexing";
   if (status === "embedded") return embeddedChunks ? "Ready" : "Ready";
   if (status === "skipped") return "Needs attention";
