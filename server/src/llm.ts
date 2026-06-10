@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { selectModelRoute, type ModelMode } from "./modelRouter.js";
 
 export class LlmError extends Error {
   constructor(message: string) {
@@ -20,6 +21,7 @@ export async function generateStructuredText(input: {
   system: string;
   user: string;
   purpose: string;
+  modelMode?: ModelMode;
   metadata?: Record<string, string | number | boolean | null | undefined>;
 }) {
   if (config.llmProvider !== "openai") {
@@ -32,6 +34,11 @@ export async function generateStructuredText(input: {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.llmTimeoutMs);
   const startedAt = Date.now();
+  const route = selectModelRoute({
+    content: input.user,
+    requestedMode: input.modelMode,
+    purpose: input.purpose
+  });
   const promptCharacters = input.system.length + input.user.length;
   const promptTokenEstimate = Math.ceil(promptCharacters / 4);
   const safeMetadata = input.metadata
@@ -42,10 +49,11 @@ export async function generateStructuredText(input: {
     JSON.stringify({
       event: "llm_call_start",
       purpose: input.purpose,
-      provider: config.llmProvider,
-      model: config.llmModel,
+      provider: route.provider,
+      model: route.model,
+      model_mode: route.mode,
       timeout_ms: config.llmTimeoutMs,
-      max_output_tokens: config.llmMaxOutputTokens,
+      max_output_tokens: route.maxOutputTokens,
       system_characters: input.system.length,
       user_characters: input.user.length,
       prompt_characters: promptCharacters,
@@ -62,13 +70,13 @@ export async function generateStructuredText(input: {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: config.llmModel,
+        model: route.model,
         input: [
           { role: "system", content: input.system },
           { role: "user", content: input.user }
         ],
-        temperature: config.llmTemperature,
-        max_output_tokens: config.llmMaxOutputTokens
+        temperature: route.temperature,
+        max_output_tokens: route.maxOutputTokens
       }),
       signal: controller.signal
     });
@@ -129,7 +137,8 @@ export async function generateStructuredText(input: {
     return {
       text,
       provider: config.llmProvider,
-      model: config.llmModel,
+      model: route.model,
+      modelMode: route.mode,
       usage: body.usage
         ? {
             input_tokens: body.usage.input_tokens,

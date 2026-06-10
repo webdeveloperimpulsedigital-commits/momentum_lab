@@ -1,6 +1,6 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { LayoutDashboard, Plus, Save, Search, Trash2 } from "lucide-react";
+import { FileUp, Globe2, LayoutDashboard, Paperclip, Plus, Save, Search, Send, Sparkles, Trash2 } from "lucide-react";
 import {
   BRAVERY_LEVELS,
   BLUEPRINT_DEPTHS,
@@ -23,6 +23,7 @@ import {
   type ProjectDossier,
   type ProjectIdeaCard,
   type ProjectIdeaEvaluation,
+  type ProjectMessage,
   type Project,
   type ProjectStatus,
   type ProjectWorkspaceData,
@@ -59,6 +60,7 @@ export function ProjectWorkspace() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [workspace, setWorkspace] = useState<ProjectWorkspaceData>(blankWorkspace);
   const [sources, setSources] = useState<ProjectSource[]>([]);
+  const [messages, setMessages] = useState<ProjectMessage[]>([]);
   const [projectDraft, setProjectDraft] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -72,13 +74,15 @@ export function ProjectWorkspace() {
       api.getProject(projectId),
       api.listProjects(),
       api.getWorkspace(projectId),
-      api.listProjectSources(projectId)
+      api.listProjectSources(projectId),
+      api.listMessages(projectId)
     ])
-      .then(([projectResponse, projectsResponse, workspaceResponse, sourcesResponse]) => {
+      .then(([projectResponse, projectsResponse, workspaceResponse, sourcesResponse, messagesResponse]) => {
         setProject(projectResponse.project);
         setProjects(projectsResponse.projects);
         setWorkspace(workspaceResponse.workspace);
         setSources(sourcesResponse.sources);
+        setMessages(messagesResponse.messages);
         setProjectDraft(projectToDraft(projectResponse.project));
         setError(null);
       })
@@ -220,7 +224,24 @@ export function ProjectWorkspace() {
           </div>
         </header>
 
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
+        <ProjectChatCommandCenter
+          project={project}
+          projectId={projectId}
+          messages={messages}
+          sources={sources}
+          outputs={workspace}
+          onMessagesChange={setMessages}
+          onSourcesChange={setSources}
+          onSourcesReload={reloadSources}
+          onWorkspaceReload={reloadWorkspace}
+        />
+
+        <details className="workspace-section mt-5">
+          <summary className="cursor-pointer text-sm font-semibold text-slate-200">
+            Advanced workflow controls
+          </summary>
+
+        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
           <form className="workspace-section" onSubmit={saveProject}>
             <SectionTitle title="Project brief" />
             <div className="grid gap-4 md:grid-cols-2">
@@ -304,9 +325,291 @@ export function ProjectWorkspace() {
           />
           <RoutesSection projectId={projectId} workspace={workspace} onChange={reloadWorkspace} />
         </div>
+        </details>
       </section>
     </main>
   );
+}
+
+function ProjectChatCommandCenter({
+  project,
+  projectId,
+  messages,
+  sources,
+  outputs,
+  onMessagesChange,
+  onSourcesChange,
+  onSourcesReload,
+  onWorkspaceReload
+}: {
+  project: Project;
+  projectId: string;
+  messages: ProjectMessage[];
+  sources: ProjectSource[];
+  outputs: ProjectWorkspaceData;
+  onMessagesChange: (messages: ProjectMessage[]) => void;
+  onSourcesChange: (updater: (current: ProjectSource[]) => ProjectSource[]) => void;
+  onSourcesReload: () => Promise<void>;
+  onWorkspaceReload: () => Promise<void>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const recentOutputs = [
+    ...outputs.campaignBlueprints.map((item) => ({ label: "Blueprint", title: item.blueprint_title })),
+    ...outputs.pitchDeckHandoffs.map((item) => ({ label: "Deck handoff", title: item.handoff_type })),
+    ...outputs.pitchDeckHandoffReviews.map((item) => ({ label: "Deck review", title: item.client_readiness_status })),
+    ...outputs.routes.map((item) => ({ label: "Route", title: item.route_title || item.route_name || "Developed route" })),
+    ...(outputs.finalTruth ? [{ label: "Campaign truth", title: outputs.finalTruth.final_route_title || "Final campaign truth" }] : [])
+  ].slice(0, 5);
+
+  const send = async (nextDraft = draft) => {
+    const content = nextDraft.trim();
+    if (!content || sending) return;
+    setSending(true);
+    setChatError(null);
+    setDraft("");
+    try {
+      const response = await api.sendMessage(projectId, content);
+      onMessagesChange([...messages, ...response.messages]);
+      await Promise.all([onSourcesReload(), onWorkspaceReload()]);
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "Could not send message");
+      setDraft(content);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const uploadFiles = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    if (!files.length) return;
+    setUploading(true);
+    setChatError(null);
+    try {
+      for (const file of files) {
+        const { source } = await api.uploadProjectSource(projectId, chatFileInput(file), file);
+        onSourcesChange((current) => [source, ...current.filter((item) => item.id !== source.id)]);
+      }
+      await onSourcesReload();
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const onDrop = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragging(false);
+    await uploadFiles(event.dataTransfer.files);
+  };
+
+  const onFileSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    await uploadFiles(event.target.files ?? []);
+    event.target.value = "";
+  };
+
+  const nextActions = [
+    "Browse the client and category before ideation.",
+    "Generate a dossier.",
+    "Give me 15 thought starters in Wild mode.",
+    "Find what competitors are not saying.",
+    "Review the handoff for client-readiness."
+  ];
+
+  return (
+    <section
+      className={`mb-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px] ${
+        dragging ? "outline outline-1 outline-cobalt" : ""
+      }`}
+      onDragOver={(event) => {
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={onDrop}
+    >
+      <div className="workspace-section min-h-[620px]">
+        <div className="flex flex-col gap-3 border-b border-line pb-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="flex flex-wrap gap-2">
+              <span className="stage-pill">Project chat</span>
+              <span className="stage-pill">{project.client_name || "Client not set"}</span>
+              <span className="stage-pill">{project.research_depth || "Standard"} research</span>
+              <span className="stage-pill">{project.bravery_level || "Sharp"} bravery</span>
+            </div>
+            <h2 className="mt-3 text-xl font-semibold text-white">Creative command center</h2>
+          </div>
+          <label className="btn-secondary cursor-pointer">
+            <Paperclip size={16} />
+            {uploading ? "Reading files..." : "Add files"}
+            <input
+              className="sr-only"
+              type="file"
+              multiple
+              accept=".txt,.md,.pdf,.docx,.png,.jpg,.jpeg,.webp"
+              onChange={onFileSelect}
+            />
+          </label>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {nextActions.map((action) => (
+            <button className="btn-secondary min-h-9 px-3 py-1 text-xs" type="button" key={action} onClick={() => send(action)}>
+              <Sparkles size={14} />
+              {action}
+            </button>
+          ))}
+        </div>
+
+        <div className="min-h-[320px] space-y-3 overflow-auto border border-line bg-ink/30 p-3">
+          {messages.length ? (
+            messages.map((message) => <ChatMessageBubble message={message} key={message.id} />)
+          ) : (
+            <div className="message assistant">
+              <p className="message-role">assistant</p>
+              <p className="whitespace-pre-wrap leading-6">
+                I’m ready. Add files or ask me to browse live web before ideation.
+              </p>
+            </div>
+          )}
+        </div>
+
+        <form
+          className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]"
+          onSubmit={(event) => {
+            event.preventDefault();
+            send();
+          }}
+        >
+          <textarea
+            className="field min-h-24 resize-y"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder="Tell Momentum Lab what to do next..."
+          />
+          <button className="btn-primary self-end" disabled={sending || !draft.trim()}>
+            <Send size={17} />
+            {sending ? "Working..." : "Send"}
+          </button>
+        </form>
+        {chatError ? <p className="text-sm text-red-300">{chatError}</p> : null}
+        {uploading || dragging ? (
+          <p className="text-sm text-slate-400">
+            {dragging ? "Drop files to add them to this project." : "Uploading, reading, and indexing files..."}
+          </p>
+        ) : null}
+      </div>
+
+      <aside className="space-y-5">
+        <section className="workspace-section">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">Project sources</h2>
+            <FileUp size={18} className="text-slate-500" />
+          </div>
+          <div className="space-y-3">
+            {sources.length ? (
+              sources.slice(0, 8).map((source) => (
+                <article className="workspace-item p-3" key={source.id}>
+                  <h3 className="break-words text-sm font-semibold text-white">{source.file_name || source.title}</h3>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span className="stage-pill">{plainSourceStatus(source)}</span>
+                    <span className="stage-pill">{source.source_role.replaceAll("_", " ")}</span>
+                  </div>
+                  {source.processing_error || source.embedding_error ? (
+                    <p className="mt-2 text-xs text-red-300">{source.processing_error || source.embedding_error}</p>
+                  ) : null}
+                </article>
+              ))
+            ) : (
+              <p className="text-sm text-slate-400">No project sources yet.</p>
+            )}
+          </div>
+        </section>
+
+        <section className="workspace-section">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">Recent outputs</h2>
+            <Globe2 size={18} className="text-slate-500" />
+          </div>
+          <div className="space-y-3">
+            {recentOutputs.length ? (
+              recentOutputs.map((item, index) => (
+                <div className="workspace-item p-3" key={`${item.label}-${index}`}>
+                  <p className="text-xs text-slate-500">{item.label}</p>
+                  <p className="mt-1 text-sm font-medium text-slate-100">{item.title}</p>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-slate-400">Dossiers, ideas, routes, and handoffs will appear here.</p>
+            )}
+          </div>
+        </section>
+      </aside>
+    </section>
+  );
+}
+
+function ChatMessageBubble({ message }: { message: ProjectMessage }) {
+  const roleLabel = message.role === "assistant" ? "Momentum Lab" : "Adwait";
+  return (
+    <article className={message.role === "user" ? "message user" : "message assistant"}>
+      <p className="message-role">{roleLabel}</p>
+      <p className="whitespace-pre-wrap leading-6">{linkifyText(message.content)}</p>
+    </article>
+  );
+}
+
+function linkifyText(content: string) {
+  const parts = content.split(/(https?:\/\/[^\s)]+)/g);
+  return parts.map((part, index) =>
+    /^https?:\/\//.test(part) ? (
+      <a className="text-cobalt underline" href={part} target="_blank" rel="noreferrer" key={`${part}-${index}`}>
+        {part}
+      </a>
+    ) : (
+      <span key={`${part}-${index}`}>{part}</span>
+    )
+  );
+}
+
+function chatFileInput(file: File): SourceInput {
+  return {
+    title: titleFromProjectFile(file.name),
+    source_role: "context",
+    source_type: projectSourceTypeFromFile(file),
+    source_status: "active",
+    tags: [],
+    description: "",
+    source_url: "",
+    content_text: ""
+  };
+}
+
+function titleFromProjectFile(fileName: string) {
+  return fileName.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim() || fileName;
+}
+
+function projectSourceTypeFromFile(file: File): SourceInput["source_type"] {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "txt" || file.type === "text/plain") return "text";
+  if (extension === "md" || file.type === "text/markdown") return "markdown";
+  if (extension === "pdf" || file.type === "application/pdf") return "pdf";
+  if (extension === "docx" || file.type.includes("wordprocessingml")) return "docx";
+  if (["png", "jpg", "jpeg", "webp"].includes(extension ?? "") || file.type.startsWith("image/")) return "image";
+  return "other";
+}
+
+function plainSourceStatus(source: ProjectSource) {
+  if (source.processing_status === "failed" || source.embedding_status === "failed") return "Needs attention";
+  if (source.embedding_status === "embedded") return "Ready";
+  if (source.processing_status === "processed") return "Indexing";
+  if (source.processing_status === "processing") return "Reading file";
+  if (source.processing_status === "queued") return "Reading file";
+  return "Uploading";
 }
 
 function IdeaExplorer({ projectId }: { projectId: string }) {

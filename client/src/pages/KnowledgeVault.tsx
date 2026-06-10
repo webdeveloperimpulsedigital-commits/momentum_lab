@@ -437,14 +437,16 @@ export function SourceManager({
                 <SourceStatusLine source={source} />
 
                 <div className="flex flex-wrap gap-2">
-                  <button
-                    className="btn-secondary"
-                    type="button"
-                    onClick={() => processSource(source.id).then(onReload)}
-                  >
-                    <FileText size={16} />
-                    {source.processing_status === "failed" ? "Retry processing" : "Process"}
-                  </button>
+                  {source.processing_status === "failed" || source.processing_status === "unsupported" ? (
+                    <button
+                      className="btn-secondary"
+                      type="button"
+                      onClick={() => processSource(source.id).then(onReload)}
+                    >
+                      <FileText size={16} />
+                      Retry
+                    </button>
+                  ) : null}
                   {source.extracted_text_available ? (
                     <>
                       <button
@@ -460,20 +462,15 @@ export function SourceManager({
                       >
                         Preview text
                       </button>
-                      <button
-                        className="btn-secondary"
-                        type="button"
-                        onClick={() => embedSource(source.id).then(onReload)}
-                      >
-                        {source.embedding_status === "failed" ? "Retry indexing" : "Index"}
-                      </button>
-                      <button
-                        className="btn-secondary"
-                        type="button"
-                        onClick={() => embedSource(source.id, true).then(onReload)}
-                      >
-                        Re-index
-                      </button>
+                      {source.embedding_status === "failed" || source.embedding_status === "skipped" ? (
+                        <button
+                          className="btn-secondary"
+                          type="button"
+                          onClick={() => embedSource(source.id, true).then(onReload)}
+                        >
+                          Retry
+                        </button>
+                      ) : null}
                     </>
                   ) : null}
                   {source.storage_path ? (
@@ -626,10 +623,10 @@ export function FilterSelect({
 function SourceStatusLine({ source }: { source: ManagedSource }) {
   const processingLabel = processingStatusLabel(source.processing_status);
   const extractionLabel = source.extracted_text_available
-    ? `Extracted - ${source.extracted_character_count} chars`
+    ? "File read"
     : source.processing_status === "failed"
-      ? "Extraction failed"
-      : "Extraction pending";
+      ? "Needs attention"
+      : "Reading file";
   const indexingLabel = embeddingStatusLabel(source.embedding_status, source.embedded_chunk_count);
 
   return (
@@ -754,20 +751,20 @@ function sourceTypeFromFile(file: File): SourceType {
 
 function processingStatusLabel(status: ManagedSource["processing_status"]) {
   if (status === "not_processed") return "Uploaded";
-  if (status === "queued") return "Queued";
-  if (status === "processing") return "Processing";
-  if (status === "processed") return "Processed";
+  if (status === "queued") return "Reading file";
+  if (status === "processing") return "Reading file";
+  if (status === "processed") return "Ready";
   if (status === "unsupported") return "Needs review";
   return "Failed";
 }
 
 function embeddingStatusLabel(status: ManagedSource["embedding_status"], embeddedChunks: number) {
-  if (status === "not_embedded") return "Indexing pending";
-  if (status === "queued") return "Indexing queued";
+  if (status === "not_embedded") return "Indexing";
+  if (status === "queued") return "Indexing";
   if (status === "embedding") return "Indexing";
-  if (status === "embedded") return `Indexed - ${embeddedChunks} chunks`;
-  if (status === "skipped") return "Indexing skipped";
-  return "Indexing failed";
+  if (status === "embedded") return embeddedChunks ? "Ready" : "Ready";
+  if (status === "skipped") return "Needs attention";
+  return "Needs attention";
 }
 
 function formatDate(value: string | null) {

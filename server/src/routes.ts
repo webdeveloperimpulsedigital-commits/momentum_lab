@@ -593,7 +593,7 @@ apiRouter.post("/global-sources", async (req, res, next) => {
       return;
     }
     const input = sourceInputSchema.parse(req.body);
-    res.status(201).json({ source: await createGlobalSource(input) });
+    res.status(201).json({ source: await createGlobalSource(req.user!.id, input) });
   } catch (error) {
     next(error);
   }

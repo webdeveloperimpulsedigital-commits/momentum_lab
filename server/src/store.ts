@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { BRAVERY_LEVELS, SOURCE_ROLE_VALUES } from "@momentum-lab/shared";
 import type {
   Project,
   ProjectCreateInput,
@@ -43,6 +44,8 @@ import type {
   SourceSearchResult,
   SourceRoleValue,
   SourceType,
+  ResearchDepth,
+  BraveryLevel,
   Settings,
   SettingsPatchInput
 } from "@momentum-lab/shared";
@@ -50,6 +53,7 @@ import { supabaseAdminClient } from "./supabase.js";
 import { sanitizeFileName } from "./uploads.js";
 import { chunkText, extractSourceText, wordCount } from "./processing.js";
 import { embedTexts, embeddingSettings, vectorLiteral } from "./embeddings.js";
+import { runLiveWebResearch, type LiveWebResearchResult } from "./liveResearch.js";
 import { buildDossierPrompt, parseDossierJson } from "./dossierPrompt.js";
 import { buildIdeationPrompt, parseIdeationJson } from "./ideationPrompt.js";
 import { buildIdeaEvaluationPrompt, parseIdeaEvaluationJson } from "./evaluationPrompt.js";
@@ -62,9 +66,6 @@ import {
   parsePitchDeckHandoffReviewJson
 } from "./handoffReviewPrompt.js";
 import { generateStructuredText, llmSettings } from "./llm.js";
-
-const placeholderAssistantResponse =
-  "Momentum Lab response placeholder. AI orchestration will be added in a later build step.";
 
 const now = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
@@ -147,7 +148,7 @@ export async function createProject(userId: string, input: ProjectCreateInput) {
       project_id: project.id,
       role: "assistant",
       content:
-        "Project Workspace initialized. Add context or ask for thought starters when AI orchestration is connected.",
+        "Project Workspace initialized. Add client context, upload files, or ask me to browse live web before ideation.",
       message_type: "normal_chat",
       model_used: null,
       created_at: project.created_at
@@ -294,33 +295,361 @@ export async function createMessagePair(
     model_used: null,
     created_at: timestamp
   };
-  const assistantMessage: ProjectMessage = {
-    id: id(),
-    project_id: projectId,
-    role: "assistant",
-    content: placeholderAssistantResponse,
-    message_type: "normal_chat",
-    model_used: null,
-    created_at: now()
-  };
 
   if (supabaseAdminClient) {
+    const { error: userError } = await supabaseAdminClient
+      .from("project_messages")
+      .insert(userMessage);
+
+    if (userError) throw userError;
+
+    const assistantMessage = await createAssistantMessageForChat(userId, project, content);
     const { data, error } = await supabaseAdminClient
       .from("project_messages")
-      .insert([userMessage, assistantMessage])
+      .insert(assistantMessage)
       .select("*")
       .order("created_at", { ascending: true });
 
     if (error) throw error;
     await updateProject(userId, projectId, {});
-    return (data ?? []) as ProjectMessage[];
+    return [userMessage, ...((data ?? []) as ProjectMessage[])];
   }
 
+  const assistantMessage = await createAssistantMessageForChat(userId, project, content);
   const messages = memoryMessages.get(projectId) ?? [];
   messages.push(userMessage, assistantMessage);
   memoryMessages.set(projectId, messages);
   memoryProjects.set(projectId, { ...project, updated_at: now() });
   return [userMessage, assistantMessage];
+}
+
+async function createAssistantMessageForChat(
+  userId: string,
+  project: Project,
+  content: string
+): Promise<ProjectMessage> {
+  try {
+    const response = await orchestrateProjectChat(userId, project, content);
+    return {
+      id: id(),
+      project_id: project.id,
+      role: "assistant",
+      content: response.content,
+      message_type: response.messageType,
+      model_used: response.modelUsed,
+      created_at: now()
+    };
+  } catch (error) {
+    return {
+      id: id(),
+      project_id: project.id,
+      role: "assistant",
+      content:
+        "[NOT READY FOR CLIENT]\n" +
+        (error instanceof Error
+          ? error.message
+          : "Momentum Lab could not complete that action. Try a smaller instruction or add the missing context."),
+      message_type: "normal_chat",
+      model_used: null,
+      created_at: now()
+    };
+  }
+}
+
+async function orchestrateProjectChat(
+  userId: string,
+  project: Project,
+  content: string
+): Promise<{ content: string; messageType: ProjectMessage["message_type"]; modelUsed: string | null }> {
+  const command = classifyProjectChatCommand(content);
+  if (command === "research") {
+    return runProjectResearchFromChat(userId, project, content);
+  }
+  if (command === "dossier") {
+    const result = await generateProjectDossier(userId, project.id, {
+      query: content.slice(0, 300),
+      retrieval_scope: "project_plus_global",
+      retrieval_mode: "semantic",
+      source_roles: [...SOURCE_ROLE_VALUES],
+      source_types: ["text", "markdown", "pdf", "docx", "note", "transcript", "url", "other"],
+      max_total_chunks: 18,
+      max_characters: 12000,
+      title: "Creative Intelligence Dossier"
+    });
+    if (!result) {
+      return {
+        content:
+          "[CLIENT INPUT NEEDED]\nI can build the dossier once this project has searchable source context. Upload files, add notes, or ask me to browse live web first.",
+        messageType: "normal_chat",
+        modelUsed: null
+      };
+    }
+    return {
+      content: formatDossierChatResponse(result.dossier),
+      messageType: "research_dossier",
+      modelUsed: result.dossier.model_name
+    };
+  }
+  if (command === "ideas") {
+    const bravery = inferBraveryLevel(content, project.bravery_level ?? "Sharp");
+    const count = inferIdeaCount(content);
+    const result = await generateProjectIdeaCards(userId, project.id, {
+      query: content.slice(0, 300),
+      bravery_level: bravery,
+      idea_count: count,
+      retrieval_scope: "project_plus_global",
+      retrieval_mode: "semantic",
+      source_roles: [...SOURCE_ROLE_VALUES],
+      source_types: ["text", "markdown", "pdf", "docx", "note", "transcript", "url", "other"],
+      max_total_chunks: 18,
+      max_characters: 12000,
+      user_instruction: content.slice(0, 800)
+    });
+    if (!result) {
+      return {
+        content:
+          "[CLIENT INPUT NEEDED]\nI can generate thought starters after there is project or global source context. Upload context or ask me to run live research first.",
+        messageType: "normal_chat",
+        modelUsed: null
+      };
+    }
+    return {
+      content: formatIdeasChatResponse(result.ideas),
+      messageType: "thought_starters",
+      modelUsed: llmSettings().model
+    };
+  }
+  if (command === "blueprint") {
+    return {
+      content:
+        "[CLIENT INPUT NEEDED]\nI can create the campaign blueprint once a final campaign truth is selected. Tell me which developed route is final, or use the advanced route/final truth controls below to lock it.",
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+  if (command === "handoff") {
+    return {
+      content:
+        "[CLIENT INPUT NEEDED]\nI can create the pitch deck handoff after there is a campaign blueprint. If the blueprint exists, tell me which one to use.",
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+
+  return {
+    content: [
+      "I’m ready. Give me client context, upload files, or ask for the next creative move.",
+      "",
+      "Useful next commands:",
+      "- Browse the client and category before ideation.",
+      "- Generate a dossier.",
+      "- Give me 15 thought starters in Wild mode.",
+      "- Red-team the shortlisted ideas.",
+      "",
+      "How brave should this round be: Safe, Sharp, Bold, Wild, or Chaos first?"
+    ].join("\n"),
+    messageType: "normal_chat",
+    modelUsed: null
+  };
+}
+
+function classifyProjectChatCommand(content: string) {
+  const text = content.toLowerCase();
+  if (/\b(browse|live web|web research|research|competitor|competitors|category scan|market scan|precedent|proof verification|verify|client website)\b/.test(text)) {
+    return "research";
+  }
+  if (/\b(dossier|intelligence brief|creative intelligence)\b/.test(text)) return "dossier";
+  if (/\b(thought starters?|ideas?|ideate|generate|make idea|combine|stranger|wild mode|chaos)\b/.test(text)) return "ideas";
+  if (/\b(blueprint|campaign blueprint|campaign truth)\b/.test(text)) return "blueprint";
+  if (/\b(handoff|pitch deck|ppt|deck review|client-readiness|client readiness)\b/.test(text)) return "handoff";
+  return "chat";
+}
+
+async function runProjectResearchFromChat(
+  userId: string,
+  project: Project,
+  content: string
+): Promise<{ content: string; messageType: ProjectMessage["message_type"]; modelUsed: string | null }> {
+  try {
+    const research = await runLiveWebResearch({
+      query: content,
+      projectContext: projectContextText(project),
+      researchDepth: inferResearchDepth(content, project.research_depth),
+      modelMode: /\b(chaos|wild)\b/i.test(content) ? "Chaos" : undefined
+    });
+    const researchRunId = await persistWebResearchRun(userId, project.id, research);
+    return {
+      content: formatResearchChatResponse(research, researchRunId),
+      messageType: "research_dossier",
+      modelUsed: research.model_name
+    };
+  } catch (error) {
+    return {
+      content: [
+        "[LIMITED RESEARCH: LIVE WEB SEARCH FAILED]",
+        "[WEB RESEARCH FAILED]",
+        error instanceof Error ? error.message : "Live web research failed.",
+        "",
+        "I have not replaced this with internal-only research. Add/check the OpenAI web-search capability and try again."
+      ].join("\n"),
+      messageType: "normal_chat",
+      modelUsed: null
+    };
+  }
+}
+
+async function persistWebResearchRun(
+  userId: string,
+  projectId: string,
+  research: LiveWebResearchResult
+) {
+  if (!supabaseAdminClient) return null;
+  try {
+    const { data, error } = await supabaseAdminClient
+      .from("web_research_runs")
+      .insert({
+        project_id: projectId,
+        created_by: userId,
+        query: research.query,
+        research_depth: research.research_depth,
+        mode_label: research.mode_label,
+        status: "completed",
+        summary: research.summary,
+        model_provider: research.model_provider,
+        model_name: research.model_name,
+        usage_json: research.usage,
+        latency_ms: research.latency_ms
+      })
+      .select("id")
+      .single();
+    if (error) throw error;
+
+    if (research.sources.length) {
+      const sourceInsert = await supabaseAdminClient.from("web_research_sources").insert(
+        research.sources.map((source) => ({
+          research_run_id: data.id,
+          project_id: projectId,
+          title: source.title,
+          url: source.url,
+          start_index: source.start_index,
+          end_index: source.end_index,
+          cited_text: source.cited_text,
+          source_kind: "url_citation"
+        }))
+      );
+      if (sourceInsert.error) throw sourceInsert.error;
+    }
+
+    return String(data.id);
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "web_research_table_persist_failed",
+        project_id: projectId,
+        message: error instanceof Error ? error.message : "Research table persistence failed"
+      })
+    );
+  }
+
+  const fallback = await createProjectSource(userId, projectId, {
+    title: `Live web research - ${research.query.slice(0, 80)}`,
+    description: "Fallback project-linked storage for live web research. Apply migration 017 for canonical research run/source tables.",
+    source_role: "context",
+    source_type: "url",
+    tags: ["live_web_research", research.research_depth.toLowerCase().replace(/\s+/g, "_")],
+    source_status: "active",
+    source_url: research.sources[0]?.url ?? "",
+    content_text: [
+      research.summary,
+      "",
+      "Sources:",
+      ...research.sources.map((source, index) => `${index + 1}. ${source.title || source.url} - ${source.url}`)
+    ].join("\n")
+  });
+  return fallback ? `project-source:${fallback.id}` : null;
+}
+
+function projectContextText(project: Project) {
+  return [
+    `Project: ${project.project_name}`,
+    project.client_name ? `Client: ${project.client_name}` : "[ASSUMPTION] Client name not provided.",
+    project.category ? `Category: ${project.category}` : "[ASSUMPTION] Category not provided.",
+    project.market ? `Market/geography: ${project.market}` : "[ASSUMPTION] Market/geography not provided.",
+    project.audience ? `Audience: ${project.audience}` : "[ASSUMPTION] Audience not provided.",
+    project.objective ? `Objective: ${project.objective}` : "[ASSUMPTION] Objective not provided.",
+    project.known_constraints ? `Constraints: ${project.known_constraints}` : "",
+    project.brief_notes ? `Notes: ${project.brief_notes}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function inferResearchDepth(content: string, fallback: ResearchDepth): ResearchDepth {
+  if (/\blight|quick|fast\b/i.test(content)) return "Light";
+  if (/\bdeep|full|major pitch|exhaustive\b/i.test(content)) return "Deep";
+  if (/\bstandard|serious\b/i.test(content)) return "Standard";
+  return fallback || "Standard";
+}
+
+function inferBraveryLevel(content: string, fallback: BraveryLevel): BraveryLevel {
+  for (const level of BRAVERY_LEVELS) {
+    if (content.toLowerCase().includes(level.toLowerCase())) return level;
+  }
+  return fallback || "Sharp";
+}
+
+function inferIdeaCount(content: string) {
+  const match = content.match(/\b([3-9]|1[0-5])\b/);
+  return match ? Number(match[1]) : 8;
+}
+
+function formatResearchChatResponse(research: LiveWebResearchResult, researchRunId: string | null) {
+  return [
+    `[LIVE WEB SOURCE] Live web research completed (${research.research_depth}, ${research.mode_label}).`,
+    researchRunId ? `Research run: ${researchRunId}` : "[LIMITED RESEARCH] Research metadata is in memory only because Supabase is not configured.",
+    "",
+    research.summary,
+    "",
+    "Sources:",
+    ...research.sources.map((source, index) => `${index + 1}. ${source.title || source.url} - ${source.url}`)
+  ].join("\n");
+}
+
+function formatDossierChatResponse(dossier: ProjectDossier) {
+  const sections = dossier.dossier_content.sections
+    .map((section) => {
+      const points = section.content.slice(0, 3).map((point) => `- ${point}`).join("\n");
+      return `### ${section.title}\n${points || "- [UNVERIFIED] No content generated."}`;
+    })
+    .join("\n\n");
+  return [
+    `[PROJECT SOURCE] [GLOBAL SOURCE] ${dossier.title}`,
+    `Grounding: ${dossier.grounding_metadata.context_pack_total_chunks} source chunks used.`,
+    "",
+    sections,
+    dossier.assumptions.length ? `\n[ASSUMPTION]\n${dossier.assumptions.map((item) => `- ${item}`).join("\n")}` : "",
+    dossier.missing_context.length ? `\n[CLIENT INPUT NEEDED]\n${dossier.missing_context.map((item) => `- ${item}`).join("\n")}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatIdeasChatResponse(ideas: ProjectIdeaCard[]) {
+  return [
+    `Generated ${ideas.length} thought starter${ideas.length === 1 ? "" : "s"}.`,
+    "",
+    ...ideas.map((idea, index) =>
+      [
+        `${index + 1}. ${idea.title}`,
+        idea.one_line_idea,
+        `Collision: ${idea.core_collision}`,
+        `Watchout: ${idea.risk_watchout}`,
+        idea.assumptions.length ? `[ASSUMPTION] ${idea.assumptions.join("; ")}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+  ].join("\n\n");
 }
 
 export async function listGlobalSources() {
@@ -364,7 +693,7 @@ const normalizeSource = (input: Partial<SourceInput>) => ({
   content_text: emptyToNull(input.content_text)
 });
 
-export async function createGlobalSource(input: SourceInput) {
+export async function createGlobalSource(userId: string, input: SourceInput) {
   if (!supabaseAdminClient) return null;
 
   const { data, error } = await supabaseAdminClient
@@ -379,7 +708,23 @@ export async function createGlobalSource(input: SourceInput) {
     .single();
 
   if (error) throw error;
-  return data as GlobalSource;
+  await runAutomaticSourcePipeline({
+    userId,
+    scope: "global",
+    sourceId: data.id
+  });
+  return (await getGlobalSourceById(data.id)) ?? (data as GlobalSource);
+}
+
+async function getGlobalSourceById(sourceId: string) {
+  if (!supabaseAdminClient) return null;
+  const { data, error } = await supabaseAdminClient
+    .from("global_sources")
+    .select("*")
+    .eq("id", sourceId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as GlobalSource | null) ?? null;
 }
 
 async function processSourceRecord(input: {
@@ -486,6 +831,29 @@ export async function processGlobalSource(userId: string, sourceId: string) {
   return processSourceRecord({ userId, scope: "global", sourceId });
 }
 
+async function runAutomaticSourcePipeline(input: {
+  userId: string;
+  scope: "global" | "project";
+  sourceId: string;
+  projectId?: string;
+}) {
+  try {
+    const processed = await processSourceRecord(input);
+    if (!processed || processed.processing_status !== "processed") return;
+    await embedSourceRecord({ ...input, force: false });
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "automatic_source_pipeline_failed",
+        scope: input.scope,
+        project_id: input.projectId,
+        source_id: input.sourceId,
+        message: error instanceof Error ? error.message : "Source pipeline failed"
+      })
+    );
+  }
+}
+
 export async function createGlobalFileSource(
   userId: string,
   input: SourceInput,
@@ -524,7 +892,12 @@ export async function createGlobalFileSource(
     .single();
 
   if (error) throw error;
-  return data as GlobalSource;
+  await runAutomaticSourcePipeline({
+    userId,
+    scope: "global",
+    sourceId
+  });
+  return (await getGlobalSourceById(sourceId)) ?? (data as GlobalSource);
 }
 
 export async function updateGlobalSource(sourceId: string, patch: Partial<SourceInput>) {
@@ -2907,7 +3280,25 @@ export async function createProjectSource(
 
   if (error) throw error;
   await updateProject(userId, projectId, {});
-  return data as ProjectSource;
+  await runAutomaticSourcePipeline({
+    userId,
+    scope: "project",
+    projectId,
+    sourceId: data.id
+  });
+  return (await getProjectSourceById(projectId, data.id)) ?? (data as ProjectSource);
+}
+
+async function getProjectSourceById(projectId: string, sourceId: string) {
+  if (!supabaseAdminClient) return null;
+  const { data, error } = await supabaseAdminClient
+    .from("project_sources")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("id", sourceId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as ProjectSource | null) ?? null;
 }
 
 export async function createProjectFileSource(
@@ -2953,7 +3344,13 @@ export async function createProjectFileSource(
 
   if (error) throw error;
   await updateProject(userId, projectId, {});
-  return data as ProjectSource;
+  await runAutomaticSourcePipeline({
+    userId,
+    scope: "project",
+    projectId,
+    sourceId
+  });
+  return (await getProjectSourceById(projectId, sourceId)) ?? (data as ProjectSource);
 }
 
 export async function createProjectSourceSignedUrl(
