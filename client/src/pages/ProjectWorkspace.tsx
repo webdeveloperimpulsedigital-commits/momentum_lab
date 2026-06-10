@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { LayoutDashboard, Plus, Save, Search, Trash2 } from "lucide-react";
 import {
   BRAVERY_LEVELS,
@@ -54,6 +54,7 @@ const blankWorkspace: ProjectWorkspaceData = {
 
 export function ProjectWorkspace() {
   const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [workspace, setWorkspace] = useState<ProjectWorkspaceData>(blankWorkspace);
@@ -62,6 +63,7 @@ export function ProjectWorkspace() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [savingProject, setSavingProject] = useState(false);
+  const [deletingProject, setDeletingProject] = useState(false);
 
   useEffect(() => {
     if (!projectId) return;
@@ -147,6 +149,23 @@ export function ProjectWorkspace() {
     }
   };
 
+  const deleteCurrentProject = async () => {
+    if (!projectId || !project) return;
+    const confirmed = window.confirm(
+      `Delete "${project.project_name}"? This permanently removes the project workspace, project sources, generated outputs, notes, and uploaded project files.`
+    );
+    if (!confirmed) return;
+
+    setDeletingProject(true);
+    try {
+      await api.deleteProject(projectId);
+      navigate("/");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not delete project");
+      setDeletingProject(false);
+    }
+  };
+
   if (loading) {
     return <main className="px-5 py-8 text-slate-400">Loading Project Workspace...</main>;
   }
@@ -189,6 +208,15 @@ export function ProjectWorkspace() {
             <span className="stage-pill">{project.status}</span>
             <span className="stage-pill">{project.bravery_level || "Sharp"}</span>
             <span className="stage-pill">{project.research_depth || "Standard"}</span>
+            <button
+              className="btn-secondary"
+              type="button"
+              disabled={deletingProject}
+              onClick={deleteCurrentProject}
+            >
+              <Trash2 size={16} />
+              {deletingProject ? "Deleting..." : "Delete project"}
+            </button>
           </div>
         </header>
 

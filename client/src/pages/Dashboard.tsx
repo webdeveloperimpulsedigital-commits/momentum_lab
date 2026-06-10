@@ -1,4 +1,4 @@
-import { ArrowRight, BookOpen, Plus, Settings as SettingsIcon } from "lucide-react";
+import { ArrowRight, BookOpen, Plus, Settings as SettingsIcon, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 import type { Project } from "@momentum-lab/shared";
@@ -8,6 +8,7 @@ export function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -16,6 +17,24 @@ export function Dashboard() {
       .catch((error) => setError(error instanceof Error ? error.message : "Could not load projects"))
       .finally(() => setLoading(false));
   }, []);
+
+  const deleteProject = async (project: Project) => {
+    const confirmed = window.confirm(
+      `Delete "${project.project_name}"? This permanently removes the project workspace, project sources, generated outputs, notes, and uploaded project files.`
+    );
+    if (!confirmed) return;
+
+    setDeletingProjectId(project.id);
+    try {
+      await api.deleteProject(project.id);
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+      setError(null);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not delete project");
+    } finally {
+      setDeletingProjectId(null);
+    }
+  };
 
   return (
     <main className="mx-auto max-w-7xl px-5 py-8">
@@ -60,7 +79,7 @@ export function Dashboard() {
         ) : null}
         <div className="mt-5 grid gap-4 lg:grid-cols-2">
           {projects.map((project) => (
-            <Link className="project-card" key={project.id} to={`/projects/${project.id}`}>
+            <article className="project-card" key={project.id}>
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h3 className="text-lg font-semibold text-white">{project.project_name}</h3>
@@ -73,7 +92,22 @@ export function Dashboard() {
               <p className="mt-5 text-sm text-slate-500">
                 Last updated {new Date(project.updated_at).toLocaleDateString()}
               </p>
-            </Link>
+              <div className="mt-5 flex flex-wrap gap-2">
+                <Link className="btn-primary inline-flex items-center gap-2" to={`/projects/${project.id}`}>
+                  Open project
+                  <ArrowRight size={16} />
+                </Link>
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  disabled={deletingProjectId === project.id}
+                  onClick={() => deleteProject(project)}
+                >
+                  <Trash2 size={16} />
+                  {deletingProjectId === project.id ? "Deleting..." : "Delete"}
+                </button>
+              </div>
+            </article>
           ))}
         </div>
       </section>

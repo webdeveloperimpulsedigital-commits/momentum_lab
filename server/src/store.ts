@@ -209,6 +209,22 @@ export async function deleteProject(userId: string, projectId: string) {
   if (!existing) return false;
 
   if (supabaseAdminClient) {
+    const { data: projectSourceFiles, error: sourceFileError } = await supabaseAdminClient
+      .from("project_sources")
+      .select("storage_bucket, storage_path")
+      .eq("project_id", projectId)
+      .not("storage_path", "is", null);
+    if (sourceFileError) throw sourceFileError;
+
+    const storagePathsByBucket = new Map<string, string[]>();
+    for (const source of projectSourceFiles ?? []) {
+      if (!source.storage_bucket || !source.storage_path) continue;
+      storagePathsByBucket.set(source.storage_bucket, [
+        ...(storagePathsByBucket.get(source.storage_bucket) ?? []),
+        source.storage_path
+      ]);
+    }
+
     const { error } = await supabaseAdminClient
       .from("projects")
       .delete()
@@ -216,6 +232,24 @@ export async function deleteProject(userId: string, projectId: string) {
       .eq("user_id", userId);
 
     if (error) throw error;
+
+    for (const [bucket, paths] of storagePathsByBucket) {
+      const { error: storageError } = await supabaseAdminClient.storage
+        .from(bucket)
+        .remove(paths);
+      if (storageError) {
+        console.warn(
+          JSON.stringify({
+            event: "project_storage_cleanup_failed",
+            project_id: projectId,
+            bucket,
+            path_count: paths.length,
+            message: storageError.message
+          })
+        );
+      }
+    }
+
     return true;
   }
 

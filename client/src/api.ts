@@ -111,6 +111,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input)
     }),
+  deleteProject: (id: string) =>
+    request<void>(`/api/projects/${id}`, {
+      method: "DELETE"
+    }),
   getWorkspace: (id: string) =>
     request<{ workspace: ProjectWorkspaceData }>(`/api/projects/${id}/workspace`),
   createNote: (id: string, content: string) =>
